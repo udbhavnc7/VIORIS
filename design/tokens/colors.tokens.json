@@ -1,0 +1,53 @@
+{
+  "$description": "Vioris core color palette — dark graphite surfaces + electric violet/cyan accents. Source: docs/06-ui-design-system.md.",
+  "color": {
+    "graphite": {
+      "900": { "$type": "color", "$value": "#0A0A0F" },
+      "800": { "$type": "color", "$value": "#12121A" },
+      "700": { "$type": "color", "$value": "#1A1A24" },
+      "600": { "$type": "color", "$value": "#232330" },
+      "500": { "$type": "color", "$value": "#2E2E3E" },
+      "400": { "$type": "color", "$value": "#4A4A5E" },
+      "300": { "$type": "color", "$value": "#6B6B82" },
+      "200": { "$type": "color", "$value": "#9B9BB0" },
+      "100": { "$type": "color", "$value": "#C7C7D6" },
+      "50": { "$type": "color", "$value": "#EDEDF4" }
+    },
+    "violet": {
+      "600": { "$type": "color", "$value": "#7C3AED" },
+      "500": { "$type": "color", "$value": "#8B5CF6" },
+      "400": { "$type": "color", "$value": "#A78BFA" },
+      "300": { "$type": "color", "$value": "#C4B5FD" }
+    },
+    "cyan": {
+      "600": { "$type": "color", "$value": "#0891B2" },
+      "500": { "$type": "color", "$value": "#06B6D4" },
+      "400": { "$type": "color", "$value": "#22D3EE" },
+      "300": { "$type": "color", "$value": "#67E8F9" }
+    },
+    "status": {
+      "success": { "$type": "color", "$value": "#22C55E" },
+      "warning": { "$type": "color", "$value": "#F59E0B" },
+      "danger": { "$type": "color", "$value": "#EF4444" },
+      "info": { "$type": "color", "$value": "#3B82F6" }
+    },
+    "risk": {
+      "observe": { "$type": "color", "$value": "#22C55E" },
+      "prepare": { "$type": "color", "$value": "#3B82F6" },
+      "execute": { "$type": "color", "$value": "#F59E0B" },
+      "critical": { "$type": "color", "$value": "#EF4444" }
+    },
+    "text": {
+      "primary": { "$type": "color", "$value": "#EDECF4" },
+      "secondary": { "$type": "color", "$value": "#9B9BB0" },
+      "muted": { "$type": "color", "$value": "#6B6B82" },
+      "inverse": { "$type": "color", "$value": "#0A0A0F" }
+    },
+    "surface": {
+      "base": { "$type": "color", "$value": "color.graphite.900" },
+      "raised": { "$type": "color", "$value": "color.graphite.800" },
+      "glass": { "$type": "color", "$alpha": 0.72, "$value": "#12121A" },
+      "border": { "$type": "color", "$value": "#2E2E3E" }
+    }
+  }
+}

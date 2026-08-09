@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Database
+pgdata/
+
+# Audio / Models
+*.wav
+*.mp3
+models/
+*.onnx
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Docker
+docker-compose.override.yml

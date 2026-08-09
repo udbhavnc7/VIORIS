@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vioris — Phase 1 Console</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--bg); color: var(--text); font-size: 14px;
+  }
+  header { display:flex; align-items: baseline; gap: 1rem; padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
+  header .tag { color: var(--dim); font-size: 0.8rem; }
+  main { max-width: 980px; margin: 0 auto; padding: 1.25rem; display: grid; gap: 1.25rem; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; }
+  section h2 { margin: 0 0 0.75rem; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim); }
+  form { display: flex; gap: 0.5rem; }
+  input[type=text] {
+    flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 0.6rem 0.75rem; font: inherit;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  button {
+    background: var(--accent); color: #0d1117; border: 0; border-radius: 6px;
+    padding: 0.6rem 1.1rem; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  .pill { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 999px; font-size: 0.75rem; border: 1px solid var(--line); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pill.warn { color: var(--warn); border-color: var(--warn); }
+  .pill.bad { color: var(--bad); border-color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 500; }
+  .mono { font-size: 0.78rem; color: var(--dim); word-break: break-all; }
+  .muted { color: var(--dim); }
+  .tool-bar { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .tool-bar .pill { cursor: pointer; background: transparent; font: inherit; }
+  .tool-bar .pill:hover { background: #21262d; }
+  .audit-row { border-bottom: 1px solid var(--line); padding: 0.5rem 0; font-size: 0.82rem; }
+  .audit-row:last-child { border-bottom: 0; }
+  .gap { height: 0.35rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vioris</h1>
+  <span class="tag">Phase 1 console — local only · every command passes the permission engine</span>
+</header>
+<main>
+
+<section>
+  <h2>Try it</h2>
+  <form id="cmd-form">
+    <input type="text" id="cmd" autocomplete="off" spellcheck="false"
+           placeholder='e.g. what time is it · open vs code · remind me to call mom at 6pm · stop'>
+    <button type="submit">Send</button>
+  </form>
+  <div class="gap"></div>
+  <div class="tool-bar" id="samples"></div>
+
+  <div class="gap"></div>
+  <div id="result">Send a command above. The reply, tool, gate decision, and audit entry will show here.</div>
+</section>
+
+<section>
+  <h2>Registered tools (frozen registry)</h2>
+  <table id="tools-table">
+    <thead><tr><th>Tool</th><th>Tier</th><th>Confirmation</th><th>Description</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Recent tasks</h2>
+  <table id="tasks-table">
+    <thead><tr><th>When</th><th>Request</th><th>Status</th><th>Tool</th><th>Result</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Audit chain <span class="tag muted">(hash-linked, append-only — <span id="chain-state"></span>)</span></h2>
+  <div id="audit"></div>
+</section>
+
+</main>
+<script>
+const $ = (sel) => document.querySelector(sel);
+
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  const div = document.createElement('div');
+  div.textContent = typeof s === 'object' ? JSON.stringify(s) : String(s);
+  return div.innerHTML;
+}
+
+function pill(text, cls) { return `<span class="pill ${cls}">${esc(text)}</span>`; }
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url + ' -> ' + r.status);
+  return r.json();
+}
+
+async function loadTools() {
+  const data = await getJSON('/api/tools');
+  const tb = $('#tools-table tbody');
+  tb.innerHTML = data.map(t => {
+    const cls = t.tier === 'critical' ? 'bad' : t.tier === 'execute' ? 'warn' : 'ok';
+    return `<tr><td>${esc(t.tool_name)}</td><td>${pill(t.tier, cls)}</td><td>${t.confirmation_required ? pill('yes', 'warn') : esc('no')}</td><td>${esc(t.description)}</td></tr>`;
+  }).join('');
+}
+
+async function loadTasks() {
+  const data = await getJSON('/api/tasks');
+  const tb = $('#tasks-table tbody');
+  tb.innerHTML = data.map(t => {
+    const cls = t.status === 'completed' ? 'ok' : t.status === 'waiting_approval' ? 'warn' : 'bad';
+    return `<tr><td>${esc(t.created_at)}</td><td>${esc(t.request)}</td><td>${pill(t.status, cls)}</td><td>${esc(t.tool)}</td><td class="mono">${esc(t.result)}</td></tr>`;
+  }).join('');
+}
+
+async function loadAudit() {
+  const data = await getJSON('/api/audit');
+  const badge = document.createElement('span');
+  badge.className = 'pill ' + (data.ok ? 'ok' : 'bad');
+  badge.textContent = data.ok ? 'chain verified ✓' : 'CORRUPT: ' + data.problems.join('; ');
+  $('#chain-state').replaceWith(badge);
+  const box = $('#audit');
+  box.innerHTML = data.events.map(ev =>
+    `<div class="audit-row">
+       <div>${esc(ev.created_at)} — <b>${esc(ev.actor)}</b> ${esc(ev.action)} ${ev.task_id ? `(task ${esc(ev.task_id)})` : ''}</div>
+       <div class="mono">detail=${esc(ev.detail)}</div>
+       <div class="mono">hash=${esc(ev.hash)}</div>
+     </div>`).join('') || '<div class="muted">no audit events yet</div>';
+}
+
+async function sendCommand(text) {
+  const res = $('#result');
+  res.innerHTML = '<span class="muted">dispatching…</span>';
+  try {
+    const r = await fetch('/api/command', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({transcript: text}),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const out = await r.json();
+    const gate = out.blocked ? pill('BLOCKED', 'bad') : pill('executed', 'ok');
+    res.innerHTML =
+      `<div>${esc(out.reply)}</div>
+       <div class="gap"></div>
+       <div>tool=${esc(out.tool)} status=${pill(out.status, out.status === 'completed' ? 'ok' : 'warn')} gate=${gate}</div>
+       <div class="gap"></div>
+       <div class="mono">${esc(out.outcome)}</div>`;
+  } catch (err) {
+    res.innerHTML = pill('request failed: ' + err.message, 'bad');
+  }
+  await Promise.all([loadTools(), loadTasks(), loadAudit()]);
+}
+
+const samples = ['what time is it', 'tell me the time', 'open vs code', 'remind me to stretch for 5 minutes at 3pm', 'stop', 'open'];
+$('#samples').innerHTML = samples.map(s => `<button class="pill" data-s="${esc(s.replace(/"/g, '&quot;'))}">${esc(s)}</button>`).join('');
+$('#samples').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  $('#cmd').value = b.dataset.s;
+  sendCommand(b.dataset.s);
+});
+
+$('#cmd-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const text = $('#cmd').value.trim();
+  if (text) sendCommand(text);
+});
+
+loadTools();
+loadTasks();
+loadAudit();
+</script>
+</body>
+</html>

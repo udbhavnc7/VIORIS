@@ -1,0 +1,37 @@
+{
+  "$description": "Vioris typography scale — high readability, restrained sci-fi. Source: docs/06-ui-design-system.md.",
+  "font": {
+    "family": {
+      "sans": {
+        "$type": "fontFamily",
+        "$value": ["Inter", "Segoe UI", "system-ui", "sans-serif"]
+      },
+      "mono": {
+        "$type": "fontFamily",
+        "$value": ["JetBrains Mono", "SFMono-Regular", "Consolas", "monospace"]
+      }
+    },
+    "size": {
+      "xs": { "$type": "fontSize", "$value": "0.75rem" },
+      "sm": { "$type": "fontSize", "$value": "0.875rem" },
+      "base": { "$type": "fontSize", "$value": "1rem" },
+      "lg": { "$type": "fontSize", "$value": "1.125rem" },
+      "xl": { "$type": "fontSize", "$value": "1.25rem" },
+      "2xl": { "$type": "fontSize", "$value": "1.5rem" },
+      "3xl": { "$type": "fontSize", "$value": "1.875rem" },
+      "4xl": { "$type": "fontSize", "$value": "2.25rem" },
+      "5xl": { "$type": "fontSize", "$value": "3rem" }
+    },
+    "weight": {
+      "regular": { "$type": "fontWeight", "$value": 400 },
+      "medium": { "$type": "fontWeight", "$value": 500 },
+      "semibold": { "$type": "fontWeight", "$value": 600 },
+      "bold": { "$type": "fontWeight", "$value": 700 }
+    },
+    "lead": {
+      "tight": { "$type": "lineHeight", "$value": 1.25 },
+      "normal": { "$type": "lineHeight", "$value": 1.5 },
+      "relaxed": { "$type": "lineHeight", "$value": 1.75 }
+    }
+  }
+}

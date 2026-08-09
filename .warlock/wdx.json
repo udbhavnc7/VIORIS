@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "tokens": {
+    "outputSubdir": "tokens",
+    "files": {
+      "colors": "design/tokens/colors.tokens.json",
+      "typography": "design/tokens/typography.tokens.json",
+      "components": "design/tokens/components.tokens.json"
+    }
+  },
+  "cdf": {
+    "outputSubdir": "design/components"
+  }
+}
