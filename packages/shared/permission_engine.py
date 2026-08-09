@@ -282,3 +282,63 @@ def register_phase3_browser_tools() -> None:
     for tool in _PHASE3_BROWSER_TOOLS:
         if not PermissionEngine.is_registered(tool.tool_name):
             PermissionEngine.register(tool)
+
+
+# ─── Phase 3 file/shell tools (Prompt 3.3 — guardrails) ──────────────────────
+# Reading/searching inside the allow-list is Observe. Moving/renaming an
+# existing file changes the filesystem (Execute). DELETE is Critical: money,
+# deletion, irreversible. shell.run_command executes a command on the laptop,
+# so it is Execute with a diff card showing the exact command and args. The
+# allow-list scope itself is enforced by the documents agent at call time —
+# anything outside the configured roots or command allow-list is REFUSED, not
+# attempted, regardless of tier.
+
+_PHASE3_FILES_TOOLS = [
+    ToolRegistration(
+        tool_name="file.search_files",
+        tier=RiskTier.OBSERVE,
+        confirmation_required=False,
+        description="Search for files matching a query inside the allow-listed directories",
+    ),
+    ToolRegistration(
+        tool_name="file.read",
+        tier=RiskTier.OBSERVE,
+        confirmation_required=False,
+        description="Read a text file inside the allow-listed directories",
+    ),
+    ToolRegistration(
+        tool_name="file.move",
+        tier=RiskTier.EXECUTE,
+        confirmation_required=True,
+        description="Move a file between two paths inside the allow-listed directories",
+        diff_card_fields=["source", "destination"],
+    ),
+    ToolRegistration(
+        tool_name="file.rename",
+        tier=RiskTier.EXECUTE,
+        confirmation_required=True,
+        description="Rename a file inside the allow-listed directories",
+        diff_card_fields=["path", "new_name"],
+    ),
+    ToolRegistration(
+        tool_name="file.delete",
+        tier=RiskTier.CRITICAL,
+        confirmation_required=True,
+        description="Permanently delete a file inside the allow-listed directories",
+        diff_card_fields=["path"],  # irreversible, deletion is always Critical
+    ),
+    ToolRegistration(
+        tool_name="terminal.run",
+        tier=RiskTier.EXECUTE,
+        confirmation_required=True,
+        description="Run a whitelisted terminal command with arguments",
+        diff_card_fields=["command", "args"],
+    ),
+]
+
+
+def register_phase3_files_tools() -> None:
+    """Register the Phase 3 file/shell tools in the engine."""
+    for tool in _PHASE3_FILES_TOOLS:
+        if not PermissionEngine.is_registered(tool.tool_name):
+            PermissionEngine.register(tool)

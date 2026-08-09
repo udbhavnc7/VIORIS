@@ -57,7 +57,7 @@ def test_fill_and_click_flow(client):
 
 def test_captcha_page_is_surfaced_and_stopped(client):
     """The agent surfaces a CAPTCHA and stops — never attempts to bypass it."""
-    r = client.post("/navigate", json={"url": "https://captcha.com"})
+    r = client.post("/navigate", json={"url": "https://captcha.example"})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False

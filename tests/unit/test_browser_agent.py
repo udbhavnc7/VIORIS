@@ -5,7 +5,7 @@ import pytest
 from packages.shared.permission_engine import PermissionEngine, register_phase3_browser_tools
 
 from agents.browser.app.agent import BrowserAgent, PermissionBlockedError
-from agents.browser.app.driver import Element, FakeDriver
+from agents.browser.app.driver import FakeDriver
 
 register_phase3_browser_tools()
 
