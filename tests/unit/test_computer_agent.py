@@ -119,6 +119,24 @@ class TestReadScreenText:
         assert "no tesseract" in out.error
 
 
+class TestLockWorkstation:
+    def test_lock_success_through_injected_backend(self, tmp_path):
+        locked = []
+        out = make_agent(tmp_path, lock_workstation_fn=lambda: locked.append(True)).lock_workstation()
+        assert out.ok
+        assert out.verified
+        assert locked == [True]
+
+    def test_lock_failure_is_reported(self, tmp_path):
+        def boom():
+            raise RuntimeError("lock refused")
+
+        out = make_agent(tmp_path, lock_workstation_fn=boom).lock_workstation()
+        assert not out.ok
+        assert "lock refused" in out.error
+        assert not out.verified
+
+
 class TestRegistryGate:
     def test_unregistered_computer_tool_never_runs(self, tmp_path):
         agent = make_agent(tmp_path)

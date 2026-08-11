@@ -27,7 +27,7 @@ from typing import Callable
 from packages.shared.permission_engine import UnknownToolError
 
 from .vision import default_ocr, default_screenshot
-from .windows import default_list_windows, default_open_app
+from .windows import default_list_windows, default_lock_workstation, default_open_app
 
 logger = logging.getLogger(__name__)
 
@@ -59,12 +59,14 @@ class ComputerAgent:
         screenshot_fn: Callable[[Path], Path] | None = None,
         ocr_fn: Callable[[Path], str] | None = None,
         open_app_fn: Callable[[str], None] | None = None,
+        lock_workstation_fn: Callable[[], None] | None = None,
     ) -> None:
         self._screenshot_dir = Path(screenshot_dir or SCREENSHOT_DIR)
         self._list_windows = list_windows_fn or default_list_windows
         self._screenshot = screenshot_fn or default_screenshot
         self._ocr = ocr_fn or default_ocr
         self._open_app = open_app_fn or default_open_app
+        self._lock_workstation = lock_workstation_fn or default_lock_workstation
         self._executions: list[str] = []
 
     # ── tools ────────────────────────────────────────────────────────────
@@ -156,6 +158,44 @@ class ComputerAgent:
             detail={"path": str(saved), "bytes": size},
             verified=ok,
             verified_note=f"{size} bytes written" if ok else "empty file written",
+        )
+
+    def capture_screenshot_bytes(self) -> bytes | None:
+        """Capture the screen and return the PNG bytes, or None on failure.
+
+        This is the on-demand frame the phone actually renders (remote
+        mirroring, Prompt 5.3). The daemon serves these bytes only inside a
+        live session, and the gateway throttles them to on-demand frequency.
+        """
+        outcome = self.capture_screenshot()
+        if not outcome.ok:
+            return None
+        path = (outcome.detail or {}).get("path")
+        if not path:
+            return None
+        return Path(path).read_bytes()
+
+    def lock_workstation(self) -> ActionOutcome:
+        """EXECUTE: immediately lock this laptop. The backend is injected so a
+        test can substitute a function that records the call."""
+        try:
+            self._lock_workstation()
+        except Exception as exc:  # noqa: BLE001
+            return ActionOutcome(
+                tool="computer.lock_workstation",
+                ok=False,
+                note="failed to lock workstation",
+                error=str(exc),
+                verified=False,
+                verified_note="lock backend reported failure",
+            )
+        self._executions.append("computer.lock_workstation")
+        return ActionOutcome(
+            tool="computer.lock_workstation",
+            ok=True,
+            note="workstation locked",
+            verified=True,
+            verified_note="lock backend completed",
         )
 
     def read_screen_text(self) -> ActionOutcome:

@@ -7,30 +7,37 @@ endpoint. Permission registry is still registered + frozen at startup.
 
 Run from the repo root:
     uvicorn services.api_gateway.app.main:app --reload --port 8420
+
+Device-scoped proxy: the mobile app talks ONLY to this gateway, which proxies
+task/approval actions to the local task-runner (VIORUS_TASK_RUNNER_URL,
+default http://127.0.0.1:8421). Every proxy call requires a verified device
+JWT — the frontend never calls the task-runner directly.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import httpx
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from packages.shared.permission_engine import (
-    PermissionEngine,
-    register_phase1_tools,
-)
+from packages.shared.permission_engine import register_phase1_tools
 
 from .pairing import (
+    Device,
     DeviceRevokedError,
-    ExchangedToken,
     InvalidDeviceTokenError,
     InvalidPairingTokenError,
     PairingExpiredError,
     PairingStore,
 )
+
+TASK_RUNNER_URL = os.getenv("VIORUS_TASK_RUNNER_URL", "http://127.0.0.1:8421")
 
 _store: PairingStore | None = None
 
@@ -56,6 +63,23 @@ class ExchangeRequest(BaseModel):
 
     device_id: str
     token: str
+
+
+class RemoteStartRequest(BaseModel):
+    """Phone requests an approved remote session (Phase 5.3)."""
+
+    name: str = Field(default="phone", min_length=1, max_length=60)
+    timeout_minutes: int = Field(default=5, ge=1, le=60)
+
+
+class RemoteInputRequest(BaseModel):
+    """One keyboard/mouse action inside a live remote session."""
+
+    session_id: str
+    action: str = Field(description="type | left | right | move")
+    text: str | None = None
+    x: int | None = None
+    y: int | None = None
 
 
 class DeviceResponse(BaseModel):
@@ -87,6 +111,41 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Vioris API Gateway", version="0.2.0", lifespan=lifespan)
+
+
+def _require_device(authorization: str | None = Header(default=None)) -> Device:
+    """FastAPI dependency: a verified, non-revoked device JWT."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        return get_store().verify(token)
+    except InvalidDeviceTokenError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except DeviceRevokedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+async def _proxy(method: str, path: str, device: Device, body: dict | None = None) -> dict:
+    """Forward an authenticated device action to the local task-runner.
+
+    The device JWT is verified here; the task-runner stays localhost-only and
+    performs its own approval/audit recording for approve/reject/stop.
+    """
+    url = f"{TASK_RUNNER_URL}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.request(method, url, json=body)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"task-runner unreachable: {exc}") from exc
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        payload = {"raw": resp.text}
+    if resp.status_code >= 400:
+        detail = payload.get("detail") if isinstance(payload, dict) else str(payload)
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return payload
 
 
 # ─── pairing endpoints ───────────────────────────────────────────────────────
@@ -159,6 +218,225 @@ async def ws_device(websocket: WebSocket) -> None:
             await asyncio.sleep(300)
     except WebSocketDisconnect:  # pragma: no cover - client closed
         return
+
+
+# ─── device-scoped proxy (mobile app talks only to this gateway) ─────────────
+
+
+@app.get("/v1/tasks")
+async def v1_tasks(device: Device = Depends(_require_device)) -> dict:
+    return {"device": device.device_id, "tasks": await _proxy("GET", "/tasks", device)}
+
+
+@app.get("/v1/approvals")
+async def v1_approvals(device: Device = Depends(_require_device)) -> dict:
+    return {"device": device.device_id, "approvals": await _proxy("GET", "/approvals", device)}
+
+
+@app.post("/v1/approvals/{approval_id}/approve")
+async def v1_approve(approval_id: str, device: Device = Depends(_require_device)) -> dict:
+    return {
+        "device": device.device_id,
+        "result": await _proxy("POST", f"/approvals/{approval_id}/approve", device),
+    }
+
+
+@app.post("/v1/approvals/{approval_id}/reject")
+async def v1_reject(approval_id: str, device: Device = Depends(_require_device)) -> dict:
+    return {
+        "device": device.device_id,
+        "result": await _proxy("POST", f"/approvals/{approval_id}/reject", device),
+    }
+
+
+@app.post("/v1/stop")
+async def v1_stop(device: Device = Depends(_require_device)) -> dict:
+    """Stop Everything: halt every non-terminal task AND kill this device's
+    remote sessions, so no further laptop input can flow. Both are audited by
+    the task-runner / computer agent respectively."""
+    stop = await _proxy("POST", "/stop-everything", device)
+    try:
+        ended = await _computer_request(
+            "POST", "/remote/session/end", {"device_id": device.device_id}
+        )
+    except HTTPException:
+        ended = {"ended_sessions": 0, "note": "computer agent unreachable"}
+    return {
+        "device": device.device_id,
+        "result": stop,
+        "remote_sessions_ended": ended.get("ended_sessions", 0),
+    }
+
+
+@app.get("/v1/activity")
+async def v1_activity(device: Device = Depends(_require_device)) -> dict:
+    """Device-authenticated activity/audit timeline for the phone.
+
+    The task-runner's audit endpoint returns {"events": [...], "chain_ok": ...};
+    this gate re-wraps it with the acting device so the phone only ever talks
+    to the gateway.
+    """
+    audit = await _proxy("GET", "/audit-events", device)
+    return {"device": device.device_id, "events": audit.get("events", []), "chain_ok": audit.get("chain_ok", True)}
+
+
+# ─── Phase 5 remote control (Prompt 5.3) ─────────────────────────────────────
+
+
+COMPUTER_URL = os.getenv("VIORUS_COMPUTER_URL", "http://127.0.0.1:8430")
+
+
+async def _computer_request(method: str, path: str, body: dict | None = None) -> dict:
+    """Talk to the computer agent daemon. It is localhost-only and session-gated."""
+    url = f"{COMPUTER_URL}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.request(method, url, json=body)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"computer agent unreachable: {exc}") from exc
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        payload = {"raw": resp.text}
+    if resp.status_code >= 400:
+        detail = payload.get("detail") if isinstance(payload, dict) else str(payload)
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return payload
+
+
+async def _computer_request_bytes(method: str, path: str) -> bytes:
+    """Fetch a binary payload (e.g. a PNG frame) from the computer agent."""
+    url = f"{COMPUTER_URL}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.request(method, url)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"computer agent unreachable: {exc}") from exc
+    if resp.status_code >= 400:
+        detail = resp.text[:300]
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return resp.content
+
+
+async def _require_active_session(device: Device) -> dict:
+    """Every screen-mirror/input action must belong to a LIVE session for the
+    acting device — an expired/revoked/unknown session is a 403, never a retry."""
+    active = await _computer_request("GET", f"/remote/session/active?device_id={device.device_id}")
+    session = active.get("session")
+    if session is None:
+        raise HTTPException(status_code=403, detail="no active remote session for this device")
+    return session
+
+
+SCREENSHOT_MIN_INTERVAL_SECONDS = 2.0  # on-demand only; never a stream
+_FRAME_LOCK: dict[str, float] = {}
+
+
+async def _throttle_frame(device_id: str) -> None:
+    """Enforce on-demand screen mirroring: at most one frame per device per
+    interval. Mirroring is a peek (on demand), never a live stream."""
+    import time
+
+    now = time.monotonic()
+    last = _FRAME_LOCK.get(device_id, 0.0)
+    if now - last < SCREENSHOT_MIN_INTERVAL_SECONDS:
+        raise HTTPException(
+            status_code=429,
+            detail="screen mirroring is on-demand only; wait a moment",
+        )
+    _FRAME_LOCK[device_id] = now
+
+
+@app.post("/v1/remote/start")
+async def v1_remote_start(req: RemoteStartRequest, device: Device = Depends(_require_device)) -> dict:
+    """Phone asks to control this laptop. This creates an EXECUTE-tier task on
+    the task-runner (computer.start_remote_session); the engine pauses at the
+    approval gate, so the phone must approve the diff card before any input
+    path opens. Nothing about the laptop is touched here."""
+    task = await _proxy(
+        "POST",
+        "/tasks",
+        device,
+        {
+            "request": f"start remote session for {req.name} (device {device.device_id})",
+            "steps": [
+                {
+                    "agent": "computer",
+                    "tool": "computer.start_remote_session",
+                    "risk_level": "execute",
+                    "result": {
+                        "args": {
+                            "device_id": device.device_id,
+                            "timeout_minutes": req.timeout_minutes,
+                        }
+                    },
+                }
+            ],
+        },
+    )
+    await _proxy("POST", f"/tasks/{task['task_id']}/run", device)
+    return {"device": device.device_id, "task": task["task_id"], "note": "approval required before session starts"}
+
+
+@app.get("/v1/remote/session")
+async def v1_remote_session(device: Device = Depends(_require_device)) -> dict:
+    """Current live session for this device (or null)."""
+    active = await _computer_request("GET", f"/remote/session/active?device_id={device.device_id}")
+    return {"device": device.device_id, "session": active.get("session")}
+
+
+@app.get("/v1/remote/screenshot")
+async def v1_remote_screenshot(device: Device = Depends(_require_device)) -> Response:
+    """On-demand screen mirror frame, ONLY while a live session exists and at
+    most one frame per device per interval — never a continuous stream. Returns
+    raw PNG bytes the phone renders directly."""
+    await _require_active_session(device)
+    await _throttle_frame(device.device_id)
+    data = await _computer_request_bytes("GET", f"/remote/screenshot-image?device_id={device.device_id}")
+    return Response(content=data, media_type="image/png")
+
+
+@app.post("/v1/remote/end")
+async def v1_remote_end(device: Device = Depends(_require_device)) -> dict:
+    """Phone explicitly ends its own remote session now (before auto-expiry).
+    Immediately invalidates every live session the device holds."""
+    return await _computer_request(
+        "POST", "/remote/session/end", {"device_id": device.device_id}
+    )
+
+
+@app.post("/v1/remote/lock")
+async def v1_remote_lock(device: Device = Depends(_require_device)) -> dict:
+    """Remote 'lock now' from the phone. Execute-tier and session-gated: a live
+    session for this device must exist, then the laptop locks immediately and
+    the session ends so no further input can flow from the phone."""
+    await _require_active_session(device)
+    lock = await _computer_request(
+        "POST", "/remote/lock", {"device_id": device.device_id}
+    )
+    lock["device"] = device.device_id
+    return lock
+
+
+@app.post("/v1/remote/input")
+async def v1_remote_input(req: RemoteInputRequest, device: Device = Depends(_require_device)) -> dict:
+    """Send keyboard/mouse input. The session gate is re-checked here AND at the
+    computer daemon; every input is an execute-tier action in the static
+    registry, but within a live, approved session the diff card was already
+    shown for starting it."""
+    await _require_active_session(device)
+    return await _computer_request(
+        "POST",
+        "/remote/input",
+        {
+            "session_id": req.session_id,
+            "device_id": device.device_id,
+            "action": req.action,
+            "text": req.text,
+            "x": req.x,
+            "y": req.y,
+        },
+    )
 
 
 # ─── existing endpoints ──────────────────────────────────────────────────────

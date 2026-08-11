@@ -72,10 +72,16 @@ def get_task(task_id: str) -> dict:
     return _task_dict(get_manager().get(task_id))
 
 
-def _execute(step) -> dict:
-    """In-process stand-in executor. Phase 3 replaces this with the real
-    computer/browser agents."""
-    return {"ok": True, "tool": step.tool}
+def _execute(step):
+    """Dispatch an approved step to the owning agent daemon (Phase 5, 5.3).
+
+    Previously a pass-through stand-in; now the task-runner routes real
+    computer-agent tools (incl. start_remote_session + remote_input) and the
+    engine verifies the agent's reported outcome before marking the step done.
+    """
+    from .executor import make_executor
+
+    return make_executor()(step)
 
 
 @app.post("/tasks/{task_id}/run")
@@ -131,6 +137,19 @@ def list_approvals(task_id: str) -> list[dict]:
     return get_manager().pending_approvals(task_id)
 
 
+@app.get("/approvals")
+def list_all_approvals() -> list[dict]:
+    """Every pending approval across all tasks (Power the mobile queue)."""
+    return get_manager().pending_approvals()
+
+
+@app.post("/stop-everything")
+def stop_everything() -> dict:
+    """Emergency stop: halt every non-terminal task (Stop Everything control)."""
+    affected = get_manager().stop_all()
+    return {"stopped": affected, "count": len(affected)}
+
+
 @app.post("/approvals/{approval_id}/approve")
 def approve_approval(approval_id: str, task_id: str | None = None) -> dict:
     mgr = get_manager()
@@ -138,6 +157,11 @@ def approve_approval(approval_id: str, task_id: str | None = None) -> dict:
     if approval is None:
         raise HTTPException(status_code=404, detail="approval not found")
     task = mgr.approve(approval.task_id, approval_id)
+    # Auto-run the armed step: "approve from your phone while the laptop is
+    # out of sight" must actually FIRE the step. The step was re-armed from
+    # WAITING_APPROVAL to CREATED by approve(); run_next_step executes it with
+    # the real executor and continues until the next gate or completion.
+    task, _ = mgr.run_next_step(task.task_id, _execute)
     return {
         "approved": approval_id,
         "task_id": task.task_id,

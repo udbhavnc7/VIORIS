@@ -80,3 +80,51 @@ def test_registered_computer_tools_are_observe_tier(client):
 
     for tool in ("computer.list_windows", "computer.open_app", "computer.capture_screenshot", "computer.read_screen_text"):
         assert PermissionEngine.classify(tool).confirmation_required is False
+
+
+def test_screenshot_image_requires_active_session(client):
+    r = client.get("/remote/screenshot-image?device_id=phone-1")
+    assert r.status_code == 403  # no session -> no frame, ever
+
+
+def test_screenshot_image_delivers_png_inside_session(client):
+    r = client.post("/remote/session", json={"device_id": "phone-1", "timeout_minutes": 5})
+    assert r.status_code == 200
+    session = r.json()["session"]
+    r = client.get("/remote/screenshot-image?device_id=phone-1")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.content.startswith(b"\x89PNG")
+    assert session["expired"] is False
+    # after ending the session the same frame request is refused again
+    client.post("/remote/session/end", json={"device_id": "phone-1"})
+    assert client.get("/remote/screenshot-image?device_id=phone-1").status_code == 403
+
+
+def test_remote_lock_requires_active_session(client):
+    assert client.post("/remote/lock", json={"device_id": "phone-1"}).status_code == 403
+
+
+def test_remote_lock_locks_then_ends_session(client, monkeypatch):
+    locked = []
+    from agents.computer.app import daemon as computer_daemon
+
+    def fake_lock():
+        locked.append(True)
+
+    # Re-slot the agent so the injected lock backend is used and the lock is verifiable.
+    computer_daemon._agent = ComputerAgent(
+        screenshot_dir=None,
+        list_windows_fn=lambda: [],
+        screenshot_fn=(lambda p: (p.write_bytes(b"\x89PNG" + b"\x00" * 8), p)[1]),
+        lock_workstation_fn=fake_lock,
+    )
+    client.post("/remote/session", json={"device_id": "phone-2", "timeout_minutes": 5})
+    r = client.post("/remote/lock", json={"device_id": "phone-2"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert locked == [True]
+    # session was ended by the lock — no further frames or locks allowed
+    assert client.get("/remote/screenshot-image?device_id=phone-2").status_code == 403
+    assert client.post("/remote/lock", json={"device_id": "phone-2"}).status_code == 403

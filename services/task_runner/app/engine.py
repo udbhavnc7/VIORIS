@@ -106,9 +106,17 @@ class TaskEngine:
         return task
 
     def stop(self, task: Task) -> Task:
-        """Emergency stop: cancel all outstanding steps, mark stopped."""
+        """Emergency stop: cancel all outstanding steps, mark stopped.
+
+        Approval-pending steps are cancelled too — after a stop a late
+        Approve can never re-arm them (arm_step requires WAITING_APPROVAL).
+        """
         for step in task.steps:
-            if step.status in (TaskStatus.CREATED, TaskStatus.RUNNING):
+            if step.status in (
+                TaskStatus.CREATED,
+                TaskStatus.RUNNING,
+                TaskStatus.WAITING_APPROVAL,
+            ):
                 step.status = TaskStatus.CANCELLED
         task.status = TaskStatus.STOPPED
         task.updated_at = _now()

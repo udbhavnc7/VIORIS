@@ -97,3 +97,19 @@ def default_open_app(daemon: str) -> None:
             )
     except Exception as exc:  # noqa: BLE001
         raise WindowLookupError(f"failed to launch '{daemon}': {exc}") from exc
+
+
+def default_lock_workstation() -> None:
+    """Immediately lock this laptop's workstation (Phase 5 remote 'lock now')."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            if not ctypes.windll.user32.LockWorkStation():
+                raise WindowLookupError("LockWorkStation() returned false")
+            return
+        except Exception as exc:  # noqa: BLE001
+            raise WindowLookupError(f"failed to lock workstation: {exc}") from exc
+    raise WindowLookupError(
+        f"workstation lock not implemented for {sys.platform}; inject a backend"
+    )

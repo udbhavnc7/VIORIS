@@ -242,6 +242,44 @@ def register_phase3_tools() -> None:
             PermissionEngine.register(tool)
 
 
+# ─── Phase 5 remote-control tools (Prompt 5.3) ───────────────────────────────
+# Screen mirroring + remote input from the phone. STARTING a remote session is
+# Execute: it hands an external device control of the laptop, so it pauses for
+# explicit approval and auto-expires. EACH remote input is also Execute-tier —
+# gated inside the agent by the active, unexpired session, never by the LLM.
+
+_REMOTE_TOOLS = [
+    ToolRegistration(
+        tool_name="computer.start_remote_session",
+        tier=RiskTier.EXECUTE,
+        confirmation_required=True,
+        description="Open an explicit, auto-expiring remote-control session for a paired device",
+        diff_card_fields=["device_id", "timeout_minutes"],
+    ),
+    ToolRegistration(
+        tool_name="computer.remote_input",
+        tier=RiskTier.EXECUTE,
+        confirmation_required=True,
+        description="Send a keyboard/mouse action to the laptop within an active remote session",
+        diff_card_fields=["session_id", "action"],
+    ),
+    ToolRegistration(
+        tool_name="computer.lock_workstation",
+        tier=RiskTier.EXECUTE,
+        confirmation_required=True,
+        description="Remote-lock the laptop workstation immediately (phone 'lock now')",
+        diff_card_fields=["device_id"],
+    ),
+]
+
+
+def register_phase5_remote_tools() -> None:
+    """Register the Phase 5 remote-control tools in the engine."""
+    for tool in _REMOTE_TOOLS:
+        if not PermissionEngine.is_registered(tool.tool_name):
+            PermissionEngine.register(tool)
+
+
 # ─── Phase 3 browser-agent tools ─────────────────────────────────────────────
 # Reading/navigating is Observe. Filling a form field stages input locally
 # (Prepare — shown, not sent). CLICKING can externally submit a form or trigger
@@ -340,5 +378,58 @@ _PHASE3_FILES_TOOLS = [
 def register_phase3_files_tools() -> None:
     """Register the Phase 3 file/shell tools in the engine."""
     for tool in _PHASE3_FILES_TOOLS:
+        if not PermissionEngine.is_registered(tool.tool_name):
+            PermissionEngine.register(tool)
+
+
+# ─── Phase 6 connector tools (Prompt 6.1 — read-only Gmail) ──────────────────
+# READING unread mail changes nothing externally, so observe tier (no
+# confirmation). Sending/reply/delete are intentionally NOT registered by this
+# connector — an unregistered tool is blocked even if some future code path
+# tried to call it.
+
+_PHASE6_CONNECTOR_TOOLS = [
+    ToolRegistration(
+        tool_name="gmail.read_unread",
+        tier=RiskTier.OBSERVE,
+        confirmation_required=False,
+        description="Fetch a digest of unread email from the connected account",
+    ),
+    ToolRegistration(
+        tool_name="gmail.digest_status",
+        tier=RiskTier.OBSERVE,
+        confirmation_required=False,
+        description="Report which Gmail account is connected and its read scope",
+    ),
+    ToolRegistration(
+        tool_name="whatsapp.read_digest",
+        tier=RiskTier.OBSERVE,
+        confirmation_required=False,
+        description="Fetch a digest of recent WhatsApp conversations from the linked browser session",
+    ),
+    ToolRegistration(
+        tool_name="whatsapp.session_status",
+        tier=RiskTier.OBSERVE,
+        confirmation_required=False,
+        description="Report whether a WhatsApp browser session is linked and how many messages are flaggable",
+    ),
+    ToolRegistration(
+        tool_name="calendar.read_upcoming",
+        tier=RiskTier.OBSERVE,
+        confirmation_required=False,
+        description="Fetch a digest of upcoming calendar events from the connected account",
+    ),
+    ToolRegistration(
+        tool_name="calendar.digest_status",
+        tier=RiskTier.OBSERVE,
+        confirmation_required=False,
+        description="Report which calendar account is connected and its read scope",
+    ),
+]
+
+
+def register_phase6_connector_tools() -> None:
+    """Register the Phase 6 connector tools (observe-tier reads only)."""
+    for tool in _PHASE6_CONNECTOR_TOOLS:
         if not PermissionEngine.is_registered(tool.tool_name):
             PermissionEngine.register(tool)

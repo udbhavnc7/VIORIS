@@ -1,2 +1,4 @@
 {"step_id": "step_b56e42cf", "idempotency_key": "f928578b3fd84d72ac377560730f4ef5", "tool": "system.send_message"}
 {"step_id": "step_d6f39362", "idempotency_key": "3f9bde2c8c7643ed9e7bc7280809d6a4", "tool": "system.send_message"}
+{"step_id": "step_2621afa4", "idempotency_key": "13eef0c16fad4ca79aafbf24cc001cf4", "tool": "system.open_app"}
+{"step_id": "step_ad4b8fd8", "idempotency_key": "2da5dd89181c4b29b8e952cf1221ab63", "tool": "system.open_app"}

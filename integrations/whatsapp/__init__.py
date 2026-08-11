@@ -1,0 +1,1 @@
+"""WhatsApp connector (Phase 6, Prompt 6.2) — browser-session based, digest only."""

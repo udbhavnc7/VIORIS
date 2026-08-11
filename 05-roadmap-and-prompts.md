@@ -1,3 +1,4 @@
+
 # 05 — Roadmap & Sequential Build Prompts
 
 Each phase lists deliverables, an exit test, and multiple ready-to-paste prompts for your coding agent (Claude Code / Cursor / etc.). Run them in order — each assumes the previous phase's code exists in the repo. Keep prompts one-capability-at-a-time; a prompt that tries to build three phases at once is how permission bypasses sneak in.

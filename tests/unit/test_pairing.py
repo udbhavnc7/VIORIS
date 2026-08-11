@@ -33,7 +33,7 @@ class TestPairing:
         proof = s.issue_pairing("phone")
         traded = s.exchange(proof.device_id, proof.token)
         assert traded.device_id == proof.device_id
-        payload = jwt.decode(traded, s._secret, algorithms=["HS256"])
+        payload = jwt.decode(traded.jwt, s._secret, algorithms=["HS256"])
         assert payload["sub"] == proof.device_id
         assert payload["type"] == "device"
 

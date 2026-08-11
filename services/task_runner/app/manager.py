@@ -111,6 +111,28 @@ class TaskManager:
         self.append_audit("system", "cancelled", {}, task.task_id)
         return task
 
+    def stop_all(self) -> list[str]:
+        """Emergency stop (Phase 5 'Stop Everything'): halt every
+        non-terminal task. Any step still WAITING_APPROVAL is purged so a
+        late Approve can never fire it — stop is a hard stop."""
+        affected: list[str] = []
+        tasks = self.list_tasks(limit=500)
+        for task in tasks:
+            if task.status.value in ("cancelled", "completed", "failed", "stopped"):
+                continue
+            try:
+                self.engine.stop(task)
+            except Exception:  # noqa: BLE001 — a stuck task must not block the rest
+                task.status = TaskStatus.STOPPED
+            self._persist(task)
+            self.append_audit("system", "stopped", {"emergency": True}, task.task_id)
+            affected.append(task.task_id)
+            for approval in self.approvals.list_pending(task.task_id):
+                self.approvals.reject(approval)
+        if affected:
+            self.events.publish({"type": "stopped_all", "task_ids": affected})
+        return affected
+
     def retry_step(self, task_id: str, step_id: str) -> Task:
         task = self.get(task_id)
         self.engine.retry_step(task, step_id)

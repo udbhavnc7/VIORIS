@@ -49,6 +49,51 @@ TOOL_PARAMETERS: dict[str, dict] = {
         "properties": {},
         "additionalProperties": False,
     },
+    "gmail.read_unread": {
+        "type": "object",
+        "properties": {
+            "hours": {
+                "type": "integer",
+                "description": "look back window in hours (default 24)",
+            }
+        },
+        "additionalProperties": False,
+    },
+    "gmail.digest_status": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "whatsapp.read_digest": {
+        "type": "object",
+        "properties": {
+            "hours": {
+                "type": "integer",
+                "description": "look back window in hours (default 24)",
+            }
+        },
+        "additionalProperties": False,
+    },
+    "whatsapp.session_status": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "calendar.read_upcoming": {
+        "type": "object",
+        "properties": {
+            "hours": {
+                "type": "integer",
+                "description": "look ahead window in hours (default 72)",
+            }
+        },
+        "additionalProperties": False,
+    },
+    "calendar.digest_status": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
 }
 
 

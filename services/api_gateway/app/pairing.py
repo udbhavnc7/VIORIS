@@ -132,7 +132,7 @@ class PairingStore:
             raise InvalidPairingTokenError("pairing token was issued to a different device")
         if expires_at < time.time():
             raise PairingExpiredError("pairing token expired")
-        return self._issue_jwt(device_id)
+        return self._issue_jwt(device)
 
     def _issue_jwt(self, device: Device) -> ExchangedToken:
         now = _now()
