@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vioris — Pair Device</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3; --dim:#8b949e; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--bg); color:var(--text); font-size:14px; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:2rem; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:2.5rem; max-width:420px; width:100%; text-align:center; }
+  h1 { font-size:1.5rem; margin:0 0 0.5rem; font-weight:600; }
+  .tag { color:var(--dim); font-size:0.85rem; margin-bottom:2rem; }
+  .qr-wrap { margin:1.5rem auto; }
+  #qr { max-width:100%; height:auto; border:1px solid var(--line); border-radius:8px; background:white; padding:0.5rem; }
+  .token { font-size:0.75rem; color:var(--dim); word-break:break-all; background:var(--bg); padding:0.75rem; border-radius:6px; border:1px solid var(--line); margin:1rem 0; font-family:inherit; }
+  .token strong { color:var(--text); }
+  .pill { display:inline-block; padding:0.15rem 0.55rem; border-radius:999px; font-size:0.75rem; border:1px solid var(--line); margin:0.25rem; }
+  .pill.ok { color:var(--ok); border-color:var(--ok); }
+  .pill.warn { color:var(--warn); border-color:var(--warn); }
+  .pill.bad { color:var(--bad); border-color:var(--bad); }
+  button { background:var(--accent); color:#0d1117; border:0; border-radius:6px; padding:0.75rem 1.5rem; font:inherit; font-weight:600; cursor:pointer; width:100%; margin-top:1rem; }
+  button:hover { filter:brightness(1.1); }
+  button:disabled { opacity:0.5; cursor:not-allowed; }
+  .status { margin-top:1rem; font-size:0.85rem; min-height:1.2em; }
+  .status.ok { color:var(--ok); }
+  .status.warn { color:var(--warn); }
+  .status.bad { color:var(--bad); }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Vioris</h1>
+  <p class="tag">Pair a new device — scan the QR code with your phone</p>
+
+  <div class="qr-wrap">
+    <div id="qr"></div>
+  </div>
+
+  <div class="token">
+    <strong>Device ID:</strong> <span id="device-id">—</span><br>
+    <strong>Pairing Token:</strong> <span id="token">—</span><br>
+    <strong>Expires:</strong> <span id="expires">—</span>
+  </div>
+
+  <div id="status" class="status">Generating pairing token…</div>
+
+  <button id="done-btn" disabled onclick="location.href='/dashboard'">Done → Open Dashboard</button>
+
+  <p style="margin-top:1.5rem; font-size:0.8rem; color:var(--dim);">
+    Or open <a href="/dashboard">/dashboard</a> if already paired.
+  </p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script>
+async function loadPairing() {
+  try {
+    const res = await fetch('/auth/device/pair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'web-dashboard-' + Math.random().toString(36).slice(2, 8) })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    document.getElementById('device-id').textContent = data.device_id;
+    document.getElementById('token').textContent = data.pairing_token;
+    document.getElementById('expires').textContent = new Date(data.expires_at * 1000).toLocaleString();
+    document.getElementById('status').textContent = 'Scan the QR code with your phone app, then tap "Exchange" there.';
+    document.getElementById('status').className = 'status warn';
+
+    // Generate QR code with the pairing token
+    const qrDiv = document.getElementById('qr');
+    qrDiv.innerHTML = '';
+    new QRCode(qrDiv, {
+      text: data.pairing_token,
+      width: 220,
+      height: 220,
+      colorDark: '#0d1117',
+      colorLight: '#ffffff',
+      correctLevel: QRCode.CorrectLevel.M
+    });
+
+    // Store device_id for the exchange step (phone will call /auth/device/exchange)
+    localStorage.setItem('vioris_pending_device_id', data.device_id);
+    localStorage.setItem('vioris_pending_token', data.pairing_token);
+
+  } catch (err) {
+    document.getElementById('status').textContent = 'Failed: ' + err.message;
+    document.getElementById('status').className = 'status bad';
+  }
+}
+
+// Check if we already have a JWT (redirect to dashboard)
+if (localStorage.getItem('vioris_jwt')) {
+  location.href = '/dashboard';
+} else {
+  loadPairing();
+}
+</script>
+</body>
+</html>

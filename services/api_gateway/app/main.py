@@ -19,11 +19,13 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from packages.shared.permission_engine import register_phase1_tools
@@ -40,6 +42,9 @@ from .pairing import (
 TASK_RUNNER_URL = os.getenv("VIORUS_TASK_RUNNER_URL", "http://127.0.0.1:8421")
 
 _store: PairingStore | None = None
+
+# ─── static files / dashboard ────────────────────────────────────────────────
+_STATIC_DIR = Path(__file__).with_name("static")
 
 
 def get_store() -> PairingStore:
@@ -111,6 +116,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Vioris API Gateway", version="0.2.0", lifespan=lifespan)
+
+# Serve the dashboard UI at /app
+if _STATIC_DIR.exists():
+    app.mount("/app", StaticFiles(directory=_STATIC_DIR, html=True), name="app")
 
 
 def _require_device(authorization: str | None = Header(default=None)) -> Device:
@@ -468,4 +477,17 @@ async def list_audit_events(limit: int = 100) -> dict:
 
 @app.get("/")
 async def root() -> dict:
-    return {"service": "vioris-api-gateway", "docs": "/docs"}
+    return {"service": "vioris-api-gateway", "docs": "/docs", "dashboard": "/app"}
+
+
+# ─── simple pairing page for the dashboard ──────────────────────────────────
+@app.get("/pair", response_class=HTMLResponse)
+async def pair_page() -> FileResponse:
+    """Serve the pairing page (no auth required)."""
+    return FileResponse(_STATIC_DIR / "pair.html")
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard_page() -> FileResponse:
+    """Serve the main dashboard (requires auth via JWT in localStorage)."""
+    return FileResponse(_STATIC_DIR / "dashboard.html")

@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vioris — Dashboard</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3; --dim:#8b949e; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--bg); color:var(--text); font-size:14px; }
+  header { display:flex; align-items:baseline; gap:1rem; padding:0.9rem 1.25rem; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:10; }
+  header h1 { font-size:1.05rem; margin:0; font-weight:600; }
+  header .tag { color:var(--dim); font-size:0.8rem; }
+  header .spacer { flex:1; }
+  header .conn { font-size:0.78rem; padding:0.2rem 0.6rem; border-radius:999px; border:1px solid var(--line); }
+  .conn.on { color:var(--ok); border-color:var(--ok); }
+  .conn.off { color:var(--bad); border-color:var(--bad); }
+  nav { display:flex; gap:0.25rem; padding:0.5rem 1.25rem; border-bottom:1px solid var(--line); }
+  nav button { background:transparent; color:var(--dim); border:0; border-radius:6px; padding:0.5rem 0.9rem; font:inherit; cursor:pointer; }
+  nav button.active { background:var(--panel); color:var(--text); }
+  nav button:hover { color:var(--text); }
+  main { max-width:1100px; margin:0 auto; padding:1.25rem; }
+  section { display:none; }
+  section.active { display:block; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:1rem; margin-bottom:1rem; }
+  .panel h2 { margin:0 0 0.75rem; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--dim); }
+  table { width:100%; border-collapse:collapse; font-size:0.82rem; }
+  th, td { text-align:left; padding:0.4rem 0.5rem; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--dim); font-weight:500; }
+  .mono { font-size:0.76rem; color:var(--dim); word-break:break-all; }
+  .pill { display:inline-block; padding:0.12rem 0.5rem; border-radius:999px; font-size:0.72rem; border:1px solid var(--line); }
+  .pill.ok { color:var(--ok); border-color:var(--ok); }
+  .pill.warn { color:var(--warn); border-color:var(--warn); }
+  .pill.bad { color:var(--bad); border-color:var(--bad); }
+  button.btn { background:var(--accent); color:#0d1117; border:0; border-radius:6px; padding:0.45rem 0.9rem; font:inherit; font-weight:600; cursor:pointer; }
+  button.btn:hover { filter:brightness(1.1); }
+  button.btn:disabled { opacity:0.5; cursor:not-allowed; }
+  button.ghost { background:transparent; color:var(--dim); border:1px solid var(--line); border-radius:6px; padding:0.45rem 0.9rem; font:inherit; cursor:pointer; }
+  button.ghost:hover { color:var(--text); }
+  button.danger { background:transparent; color:var(--bad); border:1px solid var(--bad); border-radius:6px; padding:0.45rem 0.9rem; font:inherit; cursor:pointer; }
+  button.danger:hover { background:var(--bad); color:#0d1117; }
+  .approval { border:1px solid var(--line); border-radius:8px; padding:0.9rem; margin-bottom:0.75rem; background:var(--bg); }
+  .approval .top { display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap; }
+  .approval .diff { margin:0.75rem 0; padding:0.6rem; background:var(--panel); border-radius:6px; font-size:0.78rem; }
+  .approval .diff div { padding:0.15rem 0; }
+  .approval .diff b { color:var(--accent); }
+  .actions { display:flex; gap:0.5rem; margin-top:0.5rem; }
+  .audit-row { border-bottom:1px solid var(--line); padding:0.5rem 0; font-size:0.8rem; }
+  .audit-row:last-child { border-bottom:0; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
+  @media (max-width:760px) { .grid2 { grid-template-columns:1fr; } }
+  input[type=text], input[type=number], select {
+    background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:0.5rem 0.7rem; font:inherit; }
+  input:focus, select:focus { outline:none; border-color:var(--accent); }
+  label { display:block; font-size:0.75rem; color:var(--dim); margin:0.6rem 0 0.25rem; }
+  .row { display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; }
+  .status { font-size:0.8rem; min-height:1.2em; margin-top:0.5rem; }
+  .status.warn { color:var(--warn); }
+  .status.bad { color:var(--bad); }
+  .status.ok { color:var(--ok); }
+  .muted { color:var(--dim); }
+  #shot { max-width:100%; border:1px solid var(--line); border-radius:8px; margin-top:0.75rem; display:none; background:#000; }
+  .kv b { color:var(--text); }
+  .tier-clr { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:0.35rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vioris</h1>
+  <span class="tag">dashboard · device <span id="dev-name">—</span></span>
+  <span class="spacer"></span>
+  <span class="conn off" id="conn">disconnected</span>
+</header>
+<nav id="tabs">
+  <button class="active" data-tab="tasks">Tasks</button>
+  <button data-tab="approvals">Approvals</button>
+  <button data-tab="activity">Activity</button>
+  <button data-tab="remote">Remote</button>
+  <button data-tab="devices">Devices</button>
+</nav>
+<main>
+  <section id="tasks" class="active">
+    <div class="panel">
+      <h2>Tasks</h2>
+      <table>
+        <thead><tr><th>ID</th><th>Request</th><th>Status</th><th>Risk</th><th>Steps</th></tr></thead>
+        <tbody id="tasks-body"><tr><td colspan="5" class="muted">loading…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="approvals">
+    <div class="panel">
+      <h2>Pending approvals</h2>
+      <div id="approvals-box"><div class="muted">loading…</div></div>
+      <div style="margin-top:1rem;">
+        <button class="danger" id="stop-btn">⏹ Stop Everything</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="activity">
+    <div class="panel">
+      <h2>Audit chain <span class="muted">(<span id="chain-state">…</span>)</span></h2>
+      <div id="audit-box"></div>
+    </div>
+  </section>
+
+  <section id="remote">
+    <div class="grid2">
+      <div class="panel">
+        <h2>Session</h2>
+        <div id="session-box" class="muted">loading…</div>
+        <label for="timeout">Timeout (minutes)</label>
+        <input type="number" id="timeout" value="5" min="1" max="60">
+        <div class="row" style="margin-top:0.7rem;">
+          <button class="btn" id="start-session">Start remote session</button>
+          <button class="ghost" id="end-session">End session</button>
+        </div>
+        <div class="status" id="session-status"></div>
+      </div>
+      <div class="panel">
+        <h2>Screen (on-demand)</h2>
+        <button class="btn" id="shot-btn">Capture frame</button>
+        <img id="shot" alt="screen frame">
+        <div class="status" id="shot-status"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Keyboard / mouse</h2>
+      <div class="row">
+        <input type="text" id="input-text" placeholder="type text…" style="flex:1;">
+        <button class="ghost" data-action="type">Type</button>
+      </div>
+      <div class="row" style="margin-top:0.5rem;">
+        <button class="ghost" data-action="move_left">←</button>
+        <button class="ghost" data-action="move_right">→</button>
+        <button class="ghost" data-action="move_up">↑</button>
+        <button class="ghost" data-action="move_down">↓</button>
+        <button class="ghost" data-action="click">Click</button>
+        <button class="danger" id="lock-btn" style="margin-left:auto;">Lock workstation</button>
+      </div>
+      <div class="status" id="input-status"></div>
+    </div>
+  </section>
+
+  <section id="devices">
+    <div class="panel">
+      <h2>Paired devices</h2>
+      <table>
+        <thead><tr><th>Device ID</th><th>Name</th><th>Created</th><th>Status</th><th></th></tr></thead>
+        <tbody id="devices-body"><tr><td colspan="5" class="muted">loading…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  const d = document.createElement('div');
+  d.textContent = typeof s === 'object' ? JSON.stringify(s) : String(s);
+  return d.innerHTML;
+}
+function pill(text, cls) { return `<span class="pill ${cls}">${esc(text)}</span>`; }
+
+const tierCls = { 'observe':'#58a6ff', 'prepare':'#d29922', 'execute':'#f85149', 'critical':'#ff7b72' };
+function tierCell(t) {
+  return `<span class="tier-clr" style="background:${tierCls[t]||'#8b949e'}"></span>${esc(t)}`;
+}
+
+// ── auth ──────────────────────────────────────────────────────────────────
+let JWT = null;
+
+async function ensureAuth() {
+  JWT = localStorage.getItem('vioris_jwt');
+  if (JWT) return true;
+  // If this browser generated a pairing token, exchange it directly.
+  const deviceId = localStorage.getItem('vioris_pending_device_id');
+  const token = localStorage.getItem('vioris_pending_token');
+  if (deviceId && token) {
+    try {
+      const r = await fetch('/auth/device/exchange', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: deviceId, token: token })
+      });
+      if (!r.ok) throw new Error('exchange failed');
+      const data = await r.json();
+      localStorage.setItem('vioris_jwt', data.jwt);
+      localStorage.removeItem('vioris_pending_device_id');
+      localStorage.removeItem('vioris_pending_token');
+      JWT = data.jwt;
+      return true;
+    } catch (e) {
+      localStorage.removeItem('vioris_pending_device_id');
+      localStorage.removeItem('vioris_pending_token');
+    }
+  }
+  location.href = '/pair';
+  return false;
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    ...opts,
+    headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + JWT }
+  });
+  if (r.status === 401 || r.status === 403) {
+    localStorage.removeItem('vioris_jwt');
+    location.href = '/pair';
+    throw new Error('auth required');
+  }
+  if (!r.ok) {
+    let detail = 'HTTP ' + r.status;
+    try { const j = await r.json(); detail = j.detail || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+function setConn(ok) {
+  const el = $('#conn');
+  el.textContent = ok ? 'connected' : 'disconnected';
+  el.className = 'conn ' + (ok ? 'on' : 'off');
+}
+
+// ── tasks ─────────────────────────────────────────────────────────────────
+async function loadTasks() {
+  try {
+    const d = await api('/v1/tasks');
+    const tasks = d.tasks || [];
+    const cls = s => s === 'completed' ? 'ok' : s === 'waiting_approval' || s === 'running' ? 'warn' : 'bad';
+    $('#tasks-body').innerHTML = tasks.map(t => `<tr>
+      <td class="mono">${esc(t.task_id)}</td>
+      <td>${esc(t.request)}</td>
+      <td>${pill(t.status, cls(t.status))}</td>
+      <td>${tierCell(t.risk_level)}</td>
+      <td>${(t.steps || []).map(s => `<div class="mono">${esc(s.tool)} · ${pill(s.status, cls(s.status))}</div>`).join('') || '—'}</td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">no tasks yet</td></tr>';
+  } catch (e) { $('#tasks-body').innerHTML = `<tr><td colspan="5" class="muted">${esc(e.message)}</td></tr>`; }
+}
+
+// ── approvals ─────────────────────────────────────────────────────────────
+async function loadApprovals() {
+  try {
+    const d = await api('/v1/approvals');
+    const list = d.approvals || [];
+    $('#approvals-box').innerHTML = list.map(a => `<div class="approval">
+      <div class="top">
+        <b>${esc(a.tool)}</b> ${pill(a.status || 'pending', 'warn')}
+        <span class="mono">task ${esc(a.task_id)}</span>
+        <span class="mono">${esc(a.approval_id)}</span>
+      </div>
+      <div class="diff">${Object.entries(a.diff_card || {}).map(([k, v]) => `<div><b>${esc(k)}:</b> ${esc(v)}</div>`).join('') || '<div class="muted">no diff card</div>'}</div>
+      <div class="actions">
+        <button class="btn" onclick="decide('${a.approval_id}', 'approve')">Approve</button>
+        <button class="danger" onclick="decide('${a.approval_id}', 'reject')">Reject</button>
+      </div>
+    </div>`).join('') || '<div class="muted">no pending approvals</div>';
+  } catch (e) { $('#approvals-box').innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
+}
+
+async function decide(id, action) {
+  try {
+    await api(`/v1/approvals/${id}/${action}`, { method: 'POST' });
+    await loadApprovals(); await loadTasks();
+  } catch (e) { alert(action + ' failed: ' + e.message); }
+}
+
+async function stopEverything() {
+  if (!confirm('Stop every in-progress task and end remote sessions?')) return;
+  try { const d = await api('/v1/stop', { method: 'POST' }); alert('Stopped ' + (d.result && d.result.count || 0) + ' tasks.'); await refresh(); }
+  catch (e) { alert('stop failed: ' + e.message); }
+}
+
+// ── activity ──────────────────────────────────────────────────────────────
+async function loadActivity() {
+  try {
+    const d = await api('/v1/activity');
+    const ok = d.chain_ok !== false;
+    $('#chain-state').textContent = ok ? 'chain verified ✓' : 'CORRUPT';
+    $('#chain-state').style.color = ok ? 'var(--ok)' : 'var(--bad)';
+    $('#audit-box').innerHTML = (d.events || []).map(ev => `<div class="audit-row">
+      <div>${esc(ev.created_at)} — <b>${esc(ev.actor)}</b> ${esc(ev.action)} ${ev.task_id ? `(task ${esc(ev.task_id)})` : ''}</div>
+      <div class="mono">detail=${esc(ev.detail)}</div>
+    </div>`).join('') || '<div class="muted">no events yet</div>';
+  } catch (e) { $('#audit-box').innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
+}
+
+// ── remote ────────────────────────────────────────────────────────────────
+async function loadSession() {
+  try {
+    const d = await api('/v1/remote/session');
+    const s = d.session;
+    $('#session-box').innerHTML = s
+      ? `<div class="kv"><b>session:</b> ${esc(s.session_id)}</div>
+         <div class="kv"><b>expires:</b> ${esc(s.expires_at)}</div>`
+      : '<div class="muted">no active remote session</div>';
+  } catch (e) { $('#session-box').innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
+}
+
+async function startSession() {
+  const minutes = parseInt($('#timeout').value, 10) || 5;
+  setStatus('session-status', 'requesting remote session — approval may be required…', 'warn');
+  try {
+    await api('/v1/remote/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'web-dashboard', timeout_minutes: minutes })
+    });
+    setStatus('session-status', 'session requested. Approve it in the Approvals tab.', 'warn');
+    await loadTasks(); await loadApprovals();
+  } catch (e) { setStatus('session-status', 'failed: ' + e.message, 'bad'); }
+}
+
+async function endSession() {
+  try { await api('/v1/remote/end', { method: 'POST' }); setStatus('session-status', 'session ended.', 'ok'); await loadSession(); }
+  catch (e) { setStatus('session-status', e.message, 'bad'); }
+}
+
+async function captureFrame() {
+  setStatus('shot-status', 'capturing…', 'warn');
+  try {
+    const r = await fetch('/v1/remote/screenshot', { headers: { Authorization: 'Bearer ' + JWT } });
+    if (r.status === 429) { setStatus('shot-status', 'throttled — wait a moment (on-demand only).', 'warn'); return; }
+    if (!r.ok) { const j = await r.json().catch(() => ({})); setStatus('shot-status', j.detail || ('HTTP ' + r.status), 'bad'); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const img = $('#shot'); img.src = url; img.style.display = 'block';
+    setStatus('shot-status', 'frame captured.', 'ok');
+  } catch (e) { setStatus('shot-status', e.message, 'bad'); }
+}
+
+async function sendInput(action, text) {
+  try {
+    const d = await api('/v1/remote/session');
+    const s = d.session;
+    if (!s) { setStatus('input-status', 'no active remote session.', 'bad'); return; }
+    await api('/v1/remote/input', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: s.session_id, action, text })
+    });
+    setStatus('input-status', action + ' sent.', 'ok');
+  } catch (e) { setStatus('input-status', e.message, 'bad'); }
+}
+
+async function lockWorkstation() {
+  if (!confirm('Lock the laptop workstation now?')) return;
+  try { await api('/v1/remote/lock', { method: 'POST' }); setStatus('input-status', 'locked.', 'ok'); await loadSession(); }
+  catch (e) { setStatus('input-status', e.message, 'bad'); }
+}
+
+function setStatus(id, msg, cls) { const el = $('#' + id); el.textContent = msg; el.className = 'status ' + (cls || ''); }
+
+// ── devices ───────────────────────────────────────────────────────────────
+async function loadDevices() {
+  try {
+    const r = await fetch('/devices');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const list = await r.json();
+    $('#devices-body').innerHTML = list.map(d => `<tr>
+      <td class="mono">${esc(d.device_id)}</td>
+      <td>${esc(d.name)}</td>
+      <td class="mono">${esc(d.created_at)}</td>
+      <td>${pill(d.revoked ? 'revoked' : 'active', d.revoked ? 'bad' : 'ok')}</td>
+      <td>${d.revoked ? '' : `<button class="danger" onclick="revokeDevice('${d.device_id}')">Revoke</button>`}</td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">no devices paired</td></tr>';
+  } catch (e) { $('#devices-body').innerHTML = `<tr><td colspan="5" class="muted">${esc(e.message)}</td></tr>`; }
+}
+
+async function revokeDevice(id) {
+  if (!confirm('Permanently revoke device ' + id + '?')) return;
+  try { await api('/devices/' + id + '/revoke', { method: 'POST' }); await loadDevices(); }
+  catch (e) { alert(e.message); }
+}
+
+// ── wiring ────────────────────────────────────────────────────────────────
+function refresh() { loadTasks(); loadApprovals(); loadActivity(); loadSession(); loadDevices(); }
+
+$('#tabs').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  document.querySelectorAll('#tabs button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  document.querySelectorAll('main section').forEach(s => s.classList.remove('active'));
+  $('#' + b.dataset.tab).classList.add('active');
+});
+
+$('#stop-btn').addEventListener('click', stopEverything);
+$('#start-session').addEventListener('click', startSession);
+$('#end-session').addEventListener('click', endSession);
+$('#shot-btn').addEventListener('click', captureFrame);
+$('#lock-btn').addEventListener('click', lockWorkstation);
+document.querySelectorAll('[data-action]').forEach(b => b.addEventListener('click', () => {
+  sendInput(b.dataset.action, $('#input-text').value);
+}));
+$('#input-text').addEventListener('keydown', e => {
+  if (e.key === 'Enter') sendInput('type', $('#input-text').value);
+});
+
+(async function init() {
+  if (!await ensureAuth()) return;
+  setConn(true);
+  refresh();
+  setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>
