@@ -45,11 +45,12 @@ def _bootstrap_registry() -> None:
     register_phase2_tools()
 
 
-def default_execute(step: TaskStep) -> dict:
+def default_execute(step: TaskStep, task=None) -> dict:
     """Stand-in tool executor for the CLI. Phase 3 replaces this with real agents.
 
     Every run appends to a local ledger keyed by idempotency_key so tests can
-    prove a retry does not duplicate side effects.
+    prove a retry does not duplicate side effects. `task` is accepted for the
+    engine's `execute(step, task)` contract; the CLI stand-in doesn't need it.
     """
     ledger = Path("vioris_data/task_runner_ledger.jsonl")
     ledger.parent.mkdir(parents=True, exist_ok=True)

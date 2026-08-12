@@ -74,6 +74,29 @@ TOOL_PARAMETERS: dict[str, dict] = {
         },
         "additionalProperties": False,
     },
+    "whatsapp.send_message": {
+        "type": "object",
+        "properties": {
+            "recipient": {
+                "type": "string",
+                "description": "recipient name or phone number as the user said it",
+            },
+            "recipient_identity": {
+                "type": "string",
+                "description": "resolved canonical contact identity shown on the diff card",
+            },
+            "content": {
+                "type": "string",
+                "description": "exact message text to send",
+            },
+            "channel": {
+                "type": "string",
+                "description": "delivery channel (default whatsapp)",
+            },
+        },
+        "required": ["recipient", "content"],
+        "additionalProperties": False,
+    },
     "whatsapp.session_status": {
         "type": "object",
         "properties": {},
@@ -92,6 +115,133 @@ TOOL_PARAMETERS: dict[str, dict] = {
     "calendar.digest_status": {
         "type": "object",
         "properties": {},
+        "additionalProperties": False,
+    },
+    "cloud_files.list_recent": {
+        "type": "object",
+        "properties": {
+            "hours": {
+                "type": "integer",
+                "description": "look back window in hours (default 72)",
+            }
+        },
+        "additionalProperties": False,
+    },
+    "cloud_files.digest_status": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "notes.list_recent": {
+        "type": "object",
+        "properties": {
+            "hours": {
+                "type": "integer",
+                "description": "look back window in hours (default 168)",
+            }
+        },
+        "additionalProperties": False,
+    },
+    "notes.digest_status": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "contacts.search": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "name / email / phone fragment to match"},
+        },
+        "additionalProperties": False,
+    },
+    "contacts.digest_status": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "bookmarks.search": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "title / url / folder fragment to match"},
+        },
+        "additionalProperties": False,
+    },
+    "bookmarks.digest_status": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "history.recent": {
+        "type": "object",
+        "properties": {
+            "hours": {"type": "integer", "description": "look-back window for recent visits"},
+        },
+        "additionalProperties": False,
+    },
+    "history.digest_status": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "telephony.prepare_call": {
+        "type": "object",
+        "properties": {
+            "recipient": {"type": "string", "description": "contact name or number to call"},
+            "purpose": {"type": "string", "description": "why you're calling (feeds the brief)"},
+        },
+        "required": ["recipient"],
+        "additionalProperties": False,
+    },
+    "telephony.start_call": {
+        "type": "object",
+        "properties": {
+            "recipient": {"type": "string", "description": "contact name or number as the user said it"},
+            "recipient_identity": {"type": "string", "description": "resolved canonical contact identity shown on the diff card"},
+            "phone": {"type": "string", "description": "resolved phone number shown on the diff card"},
+            "script": {"type": "string", "description": "draft script to speak (handed to the dialer with the number)"},
+        },
+        "required": ["recipient"],
+        "additionalProperties": False,
+    },
+    "reservations.search_slots": {
+        "type": "object",
+        "properties": {
+            "venue": {"type": "string", "description": "restaurant or appointment name"},
+            "date": {"type": "string", "description": "target date"},
+            "party_size": {"type": "integer", "description": "number of guests"},
+        },
+        "required": ["venue"],
+        "additionalProperties": False,
+    },
+    "reservations.create": {
+        "type": "object",
+        "properties": {
+            "slot_id": {"type": "string", "description": "chosen slot id from search_slots"},
+            "venue": {"type": "string", "description": "restaurant or appointment name (shown on diff card)"},
+            "at": {"type": "string", "description": "exact date/time (shown on diff card)"},
+            "party_size": {"type": "integer", "description": "number of guests (shown on diff card)"},
+            "guest_name": {"type": "string", "description": "name to book under (shown on diff card)"},
+        },
+        "required": ["slot_id", "guest_name"],
+        "additionalProperties": False,
+    },
+    "smart_home.device_status": {
+        "type": "object",
+        "properties": {
+            "category": {"type": "string", "description": "optional filter: light, climate, camera, energy, ..."},
+        },
+        "additionalProperties": False,
+    },
+    "smart_home.control": {
+        "type": "object",
+        "properties": {
+            "device_id": {"type": "string", "description": "device to control (shown on diff card)"},
+            "device_name": {"type": "string", "description": "human-readable device name (shown on diff card)"},
+            "category": {"type": "string", "description": "device category (safety-critical ones are refused)"},
+            "action": {"type": "string", "description": "exact action, e.g. on/off/brighter (shown on diff card)"},
+            "value": {"type": "string", "description": "target value, e.g. on/off/50 (shown on diff card)"},
+        },
+        "required": ["device_id", "action", "value"],
         "additionalProperties": False,
     },
 }

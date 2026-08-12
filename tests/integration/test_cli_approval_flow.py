@@ -52,7 +52,7 @@ def test_cli_end_to_end_approve(tmp_path):
     approval_id = mgr.pending_approvals(task.task_id)[0]["approval_id"]
     task = mgr.approve(task.task_id, approval_id)
     calls = []
-    task, outcome = mgr.run_next_step(task.task_id, lambda s: (calls.append(s.idempotency_key), {"ok": True})[1])
+    task, outcome = mgr.run_next_step(task.task_id, lambda s, task=None: (calls.append(s.idempotency_key), {"ok": True})[1])
     assert task.status == TaskStatus.COMPLETED
     assert len(calls) == 1
 
@@ -85,6 +85,6 @@ def test_cli_end_to_end_reject(tmp_path):
     calls = []
     task = mgr.reject(task.task_id, approval_id)
     assert task.status == TaskStatus.CANCELLED
-    _, outcome = mgr.run_next_step(task.task_id, lambda s: (calls.append(s.idempotency_key), {"ok": True})[1])
+    _, outcome = mgr.run_next_step(task.task_id, lambda s, task=None: (calls.append(s.idempotency_key), {"ok": True})[1])
     assert outcome.step is None or outcome.error  # rejected step never fires
     assert calls == []

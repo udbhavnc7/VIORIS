@@ -1,0 +1,1 @@
+"""Browser bookmarks connector (Phase 6) — read-only first, following the template."""

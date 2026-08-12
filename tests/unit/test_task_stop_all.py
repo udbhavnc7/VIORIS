@@ -32,7 +32,7 @@ def _create_execute_task(tmp_path, request="approve me") -> str:
         result={"args": {"recipient": "ritesh", "content": "hi", "channel": "whatsapp"}},
     )
     task = mgr.create_task(request, [step])
-    mgr.run_next_step(task.task_id, lambda s: {"ok": True})
+    mgr.run_next_step(task.task_id, lambda s, task=None: {"ok": True})
     return mgr, task.task_id
 
 
@@ -68,7 +68,7 @@ def test_stop_everything_ignores_terminal_tasks(tmp_path):
     mgr = TaskManager(Path(tmp_path) / "s.db")
     step = TaskStep(agent="computer", tool="system.open_app", risk_level=RiskTier.OBSERVE)
     done = mgr.create_task("done", [step])
-    mgr.run_next_step(done.task_id, lambda s: {"ok": True})
+    mgr.run_next_step(done.task_id, lambda s, task=None: {"ok": True})
 
     assert mgr.get(done.task_id).status.value == "completed"
     assert mgr.stop_all() == []

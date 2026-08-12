@@ -17,50 +17,16 @@ phone while the laptop is out of sight").
 
 from __future__ import annotations
 
-import threading
-import time
-
 import pytest
 import requests
-import uvicorn
 
-
-class _Server:
-    def __init__(self, app, port: int, probe_path: str = "/health") -> None:
-        self.port = port
-        self._probe = probe_path
-        self.thread = threading.Thread(
-            target=uvicorn.run,
-            kwargs={"app": app, "host": "127.0.0.1", "port": port, "log_level": "error"},
-            daemon=True,
-        )
-
-    def start(self, seconds: float = 6.0) -> None:
-        self.thread.start()
-        deadline = time.time() + seconds
-        while time.time() < deadline:
-            try:
-                r = requests.get(f"http://127.0.0.1:{self.port}{self._probe}", timeout=1)
-                if 200 <= r.status_code < 600:
-                    return
-            except requests.RequestError:
-                pass
-            except Exception:
-                time.sleep(0.05)
-        raise RuntimeError(f"server on :{self.port} did not become healthy")
+from tests.integration._server import Server as _Server, free_port
 
 
 @pytest.fixture()
 def full_stack(tmp_path, monkeypatch):
     """Boot the three services on free ports, wire by env var, inject a safe
     computer-agent OS backend so no live desktop is required."""
-    import socket
-
-    def free_port() -> int:
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-
     computer_port = free_port()
     task_runner_port = free_port()
     gateway_port = free_port()

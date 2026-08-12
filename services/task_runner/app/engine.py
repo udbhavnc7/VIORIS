@@ -126,9 +126,11 @@ class TaskEngine:
     def run_next_step(self, task: Task, execute: callable) -> tuple[StepOutcome, list[dict]]:
         """Run the next not-yet-done step. Returns its outcome + audit events.
 
-        `execute(step) -> dict` runs the tool and returns the raw result.
-        The engine does NOT mark the step done on a non-error return — the
-        verifier must pass first.
+        `execute(step, task) -> dict` runs the tool and returns the raw result.
+        The task is passed so Execute-tier connector steps can prove their
+        approval belongs to THIS task's step (task_id + step_id + key) before
+        anything external fires. The engine does NOT mark the step done on a
+        non-error return — the verifier must pass first.
         """
         events: list[dict] = []
         step = next((s for s in task.steps if s.status == TaskStatus.CREATED), None)
@@ -187,7 +189,7 @@ class TaskEngine:
         )
 
         try:
-            result = execute(step)
+            result = execute(step, task)
         except Exception as exc:  # noqa: BLE001 — tool failure becomes a failed step
             step.status = TaskStatus.FAILED
             step.error = str(exc)

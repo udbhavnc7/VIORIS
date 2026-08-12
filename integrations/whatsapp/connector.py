@@ -1,12 +1,19 @@
 """
-WhatsApp connector — browser-session based, DIGEST ONLY (Phase 6, Prompt 6.2).
+WhatsApp connector — browser-session based (Phase 6, Prompt 6.2).
 
 Approach: WhatsApp Business API requires a paid Meta business tier, so per the
 $0 constraint and the Phase 0 research question ("browser-session approach"),
-this connector drives WhatsApp Web through a local browser session. It is
-READ-ONLY: it produces a digest and nothing else. There is no send path and
-no write scope; anything future must go through the permission engine as
-Execute and reuse none of this read path.
+this connector drives WhatsApp Web through a local browser session. It has two
+paths, kept strictly separate:
+
+  - READ (Observe tier): produces a digest and nothing else.
+  - SEND (Execute tier): sends a message, and ONLY after an explicit approval
+    recorded in the task-runner ledger for that step's idempotency_key, with a
+    diff card showing the RESOLVED recipient identity (never just the typed
+    name). `whatsapp.send_message` is registered statically at EXECUTE; the
+    connector refuses to send unless an approved ledger entry exists for the
+    step. A duplicate send with the same idempotency_key returns the prior
+    result instead of sending twice.
 
 Digest shape (Prompt 6.2, exact fields):
     sender          -> sender name
@@ -36,18 +43,21 @@ from integrations.base import (
     ConnectorError,
     ExpiredSessionError,
     OAuthScopes,
+    PermissionNotApprovedError,
     RateLimitError,
 )
 
 PERMISSION_EXPLANATION = (
-    "Read only recent WhatsApp conversations from your linked browser session: "
-    "sender names, one-line summaries, and any explicit ask. It cannot send, "
-    "delete, or change anything in your account."
+    "Reads recent WhatsApp conversations from your linked browser session "
+    "(sender, one-line summary, any explicit ask). Can also send a message, but "
+    "only after you approve an exact-content diff card showing the resolved "
+    "recipient identity. It never deletes or changes anything else."
 )
 
 #: In the browser-session model there are no OAuth scopes; the connector still
 #: declares a read-only capability surface so the template's gate stays intact.
 _SESSION_SCOPE = "browser-session:read-messages"
+_SEND_SCOPE = "browser-session:send-messages"
 
 
 @dataclass
@@ -82,12 +92,30 @@ class WhatsAppDigest:
     entries: list[DigestEntry] = field(default_factory=list)
 
 
+@dataclass
+class SendResult:
+    message_id: str
+    recipient: str
+    recipient_identity: str  # resolved canonical identity (diff card shows this)
+    channel: str
+    idempotency_key: str
+    replay: bool = False  # True if a prior send with this key was returned
+
+
 class WhatsAppTransport(Protocol):
     """Minimal browser-session surface a WhatsApp connector needs."""
 
     def is_linked(self, session_ref: str) -> bool: ...
 
     def fetch_recent(self, session_ref: str, *, hours: int, max_messages: int) -> list[RawMessage]: ...
+
+    def resolve_recipient(self, session_ref: str, recipient: str) -> str:
+        """Resolve the typed recipient to a canonical contact identity.
+        Raises ConnectorError on ambiguous matches (the diff card must show
+        the resolved identity, and ambiguity forces a clarifying question)."""
+
+    def send_message(self, session_ref: str, recipient_identity: str, content: str) -> str:
+        """Send `content` to `recipient_identity`. Returns the message id."""
 
     def link(self) -> dict:
         """Start linking a new device (returns QR/polling handle + session ref)."""
@@ -153,21 +181,22 @@ def _flag_if_inaccessible(raw: RawMessage) -> DigestEntry:
 
 
 class WhatsAppConnector(AbstractConnector):
-    """Browser-session WhatsApp digest connector. Tools: whatsapp.read_digest."""
+    """Browser-session WhatsApp connector. Tools: whatsapp.read_digest,
+    whatsapp.send_message (Execute-tier, approval-gated)."""
 
     service = "whatsapp"
     auth_url = ""  # browser-session model: no OAuth endpoints
     token_url = ""
     permission_explanation = PERMISSION_EXPLANATION
-    tools = ["whatsapp.read_digest"]
+    tools = ["whatsapp.read_digest", "whatsapp.send_message"]
 
     def __init__(self, vault, transport: WhatsAppTransport | None = None, **_ignored) -> None:
         super().__init__(vault, "")
         self.transport = transport
 
     def declared_scopes(self) -> OAuthScopes:
-        # Browser-session: no OAuth scopes; capabilities enforced by transport.
-        return OAuthScopes(read=[_SESSION_SCOPE], write=[])
+        # Browser-session: no OAuth scopes; read + send capabilities separated.
+        return OAuthScopes(read=[_SESSION_SCOPE], write=[_SEND_SCOPE])
 
     # OAuth hooks required by the base template but unused in this model.
     def authorize_uri(self, state: str, redirect_uri: str) -> str:
@@ -236,6 +265,107 @@ class WhatsAppConnector(AbstractConnector):
             entries=entries,
         )
 
+    # ── send path (execute-tier, approval-ledger-gated, idempotent) ───────
+    def send_message(
+        self,
+        session_ref: str,
+        *,
+        recipient: str,
+        content: str,
+        channel: str = "whatsapp",
+        idempotency_key: str,
+        approval_verifier=None,
+    ) -> SendResult:
+        """Send a message through the linked session, ONLY if an explicit
+        approval exists in the task-runner ledger for this idempotency_key.
+
+        No shortcuts: this refuses to send unless `approval_verifier` (wired by
+        the API layer to the task-runner's ApprovalStore) confirms an approved
+        record for this step+key. Re-sending with the same idempotency_key
+        returns the prior result instead of a duplicate message.
+        """
+        if not content or not content.strip():
+            raise ConnectorError("refusing to send an empty message")
+        if not recipient or not recipient.strip():
+            raise ConnectorError("refusing to send with no recipient")
+
+        entry = self._vault.require_entry(self.service, session_ref)
+        if entry.get("expired"):
+            raise ExpiredSessionError(f"{session_ref} session expired — re-link required")
+
+        # Idempotency: a replayed key returns the prior result, never re-sends.
+        prior = self._vault.load(f"{self.service}_sends", idempotency_key)
+        if prior and prior.get("status") == "sent":
+            return SendResult(
+                message_id=prior["message_id"],
+                recipient=prior["recipient"],
+                recipient_identity=prior["recipient_identity"],
+                channel=prior["channel"],
+                idempotency_key=idempotency_key,
+                replay=True,
+            )
+
+        # Resolve the recipient to a canonical identity BEFORE the gate so the
+        # diff card can show who will actually receive the message. Ambiguous
+        # names raise loudly — the planner must clarify, not guess.
+        recipient_identity = self.transport.resolve_recipient(session_ref, recipient)
+
+        # The approval gate is the last line: an unregistered tool or a request
+        # that skips the ledger is refused here, never silently allowed.
+        self.require_approval_gate(
+            "execute",
+            "whatsapp.send_message",
+            {
+                "recipient": recipient,
+                "recipient_identity": recipient_identity,
+                "content": content,
+                "channel": channel,
+            },
+        )
+        if approval_verifier is not None and not approval_verifier():
+            raise PermissionNotApprovedError(
+                "no approved approval exists for this send (task-runner ledger)"
+            )
+
+        try:
+            message_id = self.transport.send_message(session_ref, recipient_identity, content)
+        except RateLimitError:
+            raise
+        except ExpiredSessionError:
+            self._vault.mark_expired(self.service, session_ref)
+            raise
+        except ConnectorError:
+            raise
+
+        self._vault.save(
+            f"{self.service}_sends",
+            idempotency_key,
+            {
+                "message_id": message_id,
+                "recipient": recipient,
+                "recipient_identity": recipient_identity,
+                "channel": channel,
+                "status": "sent",
+            },
+        )
+        self._audit(
+            session_ref,
+            "sent_message",
+            {
+                "recipient": recipient_identity,
+                "channel": channel,
+                "message_id": message_id,
+                "idempotency_key": idempotency_key,
+            },
+        )
+        return SendResult(
+            message_id=message_id,
+            recipient=recipient,
+            recipient_identity=recipient_identity,
+            channel=channel,
+            idempotency_key=idempotency_key,
+        )
+
 
 class PlaywrightWhatsAppTransport:
     """Real browser-session transport driving WhatsApp Web via Playwright.
@@ -260,6 +390,12 @@ class PlaywrightWhatsAppTransport:
 
     def fetch_recent(self, session_ref, *, hours, max_messages) -> list[RawMessage]:
         raise ConnectorError("fetch_recent requires an active playwright session")
+
+    def resolve_recipient(self, session_ref, recipient) -> str:
+        raise ConnectorError("recipient resolution requires an active playwright session")
+
+    def send_message(self, session_ref, recipient_identity, content) -> str:
+        raise ConnectorError("send_message requires an active playwright session")
 
     def unlink(self, session_ref) -> None:
         raise ConnectorError("unlink requires an active playwright session")

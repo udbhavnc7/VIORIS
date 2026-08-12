@@ -25,7 +25,7 @@ def step(tool="system.open_app", risk=RiskTier.OBSERVE, agent="computer") -> Tas
     return TaskStep(agent=agent, tool=tool, risk_level=risk)
 
 
-def ok_execute(step: TaskStep) -> dict:
+def ok_execute(step: TaskStep, task=None) -> dict:
     return {"ok": True, "tool": step.tool}
 
 
@@ -36,7 +36,7 @@ class FailingExecute:
         self.fail_until_calls = fail_until_calls
         self.seen: list[tuple[str, str]] = []  # (step_id, idempotency_key)
 
-    def __call__(self, step: TaskStep) -> dict:
+    def __call__(self, step: TaskStep, task=None) -> dict:
         self.seen.append((step.step_id, step.idempotency_key))
         if len(self.seen) <= self.fail_until_calls:
             raise RuntimeError("boom")

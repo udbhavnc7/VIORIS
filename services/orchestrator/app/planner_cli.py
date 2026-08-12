@@ -15,7 +15,10 @@ import argparse
 import json
 import sys
 
-from packages.shared.permission_engine import register_phase1_tools
+from packages.shared.permission_engine import (
+    register_phase1_tools,
+    register_phase6_connector_tools,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
 
     PermissionEngine.reset()
     register_phase1_tools()
+    register_phase6_connector_tools()  # Phase 6 connector fleet (observe/execute/prepare)
     PermissionEngine.freeze()
 
     from .llm_client import OllamaBackend

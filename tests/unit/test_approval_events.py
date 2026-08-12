@@ -60,7 +60,7 @@ class TestApprovalEvents:
         mgr = TaskManager(tmp_path / "t.db")
         task = mgr.create_task("send", [exec_step(recipient="alice", content="hi", channel="sms")])
         mgr.start(task.task_id)
-        task, _ = mgr.run_next_step(task.task_id, lambda s: {"ok": True})
+        task, _ = mgr.run_next_step(task.task_id, lambda s, task=None: {"ok": True})
         pending = mgr.pending_approvals(task.task_id)
         assert pending and pending[0]["tool"] == "system.send_message"
         assert pending[0]["diff_card"] == {"recipient": "alice", "content": "hi", "channel": "sms"}
@@ -69,7 +69,7 @@ class TestApprovalEvents:
         mgr = TaskManager(tmp_path / "t.db")
         task = mgr.create_task("send", [exec_step(recipient="bob", content="hi", channel="sms")])
         mgr.start(task.task_id)
-        mgr.run_next_step(task.task_id, lambda s: {"ok": True})
+        mgr.run_next_step(task.task_id, lambda s, task=None: {"ok": True})
         approval_id = mgr.pending_approvals(task.task_id)[0]["approval_id"]
 
         task = mgr.approve(task.task_id, approval_id)
@@ -79,7 +79,7 @@ class TestApprovalEvents:
         # A fresh task -> fresh pending approval -> reject resolves it
         task2 = mgr.create_task("send2", [exec_step(recipient="bob", content="hi", channel="sms")])
         mgr.start(task2.task_id)
-        mgr.run_next_step(task2.task_id, lambda s: {"ok": True})
+        mgr.run_next_step(task2.task_id, lambda s, task=None: {"ok": True})
         aid2 = mgr.pending_approvals(task2.task_id)[0]["approval_id"]
         mgr.reject(task2.task_id, aid2)
         assert mgr.approvals.get(aid2).status == "rejected"

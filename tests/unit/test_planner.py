@@ -1,6 +1,10 @@
 import pytest
 
-from packages.shared.permission_engine import PermissionEngine, register_phase1_tools
+from packages.shared.permission_engine import (
+    PermissionEngine,
+    register_phase1_tools,
+    register_phase6_connector_tools,
+)
 
 from services.orchestrator.app.llm_client import (
     OllamaBackend,
@@ -11,12 +15,14 @@ from services.orchestrator.app.planner import Planner
 from services.orchestrator.app.tool_schema import build_tool_schema
 
 register_phase1_tools()
+register_phase6_connector_tools()
 
 
 @pytest.fixture(autouse=True)
 def frozen_registry():
     PermissionEngine.reset()
     register_phase1_tools()
+    register_phase6_connector_tools()  # mirror the planner CLI bootstrap
     PermissionEngine.freeze()
     yield
     PermissionEngine.reset()  # don't leave the registry frozen for later modules
@@ -98,6 +104,51 @@ class TestPlannerRiskTags:
         import json
 
         json.dumps(d)  # must not raise
+
+
+class TestPhase6ConnectorPlanning:
+    def test_connector_observe_tool_tagged_observe(self):
+        backend = FakeBackend(calls=[{"name": "gmail.read_unread", "arguments": {"hours": 12}}])
+        plan = Planner(backend).plan("check my email")
+        assert len(plan.steps) == 1
+        assert plan.steps[0].tool == "gmail.read_unread"
+        assert plan.steps[0].risk_level.value == "observe"
+        assert plan.steps[0].result == {"args": {"hours": 12}}
+        assert plan.blocked_tools == []
+
+    def test_connector_execute_tool_tagged_execute(self):
+        backend = FakeBackend(
+            calls=[
+                {
+                    "name": "whatsapp.send_message",
+                    "arguments": {"recipient": "mom", "content": "hi"},
+                }
+            ]
+        )
+        plan = Planner(backend).plan("tell mom hi on whatsapp")
+        assert len(plan.steps) == 1
+        assert plan.steps[0].risk_level.value == "execute"
+
+    def test_connector_prepare_tool_tagged_prepare(self):
+        backend = FakeBackend(
+            calls=[{"name": "telephony.prepare_call", "arguments": {"recipient": "vet"}}]
+        )
+        plan = Planner(backend).plan("prepare a call to the vet")
+        assert len(plan.steps) == 1
+        assert plan.steps[0].risk_level.value == "prepare"
+
+    def test_connector_schema_exposes_reads_and_writes(self):
+        schema = build_tool_schema()
+        names = {f["function"]["name"] for f in schema}
+        assert "gmail.read_unread" in names
+        assert "whatsapp.send_message" in names
+        assert "reservations.create" in names
+        assert "smart_home.control" in names
+        # writes must never be offered as observe-only: schema is tier-agnostic,
+        # the registry decides the tier when the plan is built
+        for name in ("whatsapp.send_message", "reservations.create", "smart_home.control"):
+            params = {f["function"]["name"]: f["function"]["parameters"] for f in schema}[name]
+            assert params["type"] == "object"
 
 
 class TestPlannerEdgeCases:

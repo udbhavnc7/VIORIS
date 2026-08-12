@@ -72,16 +72,16 @@ def get_task(task_id: str) -> dict:
     return _task_dict(get_manager().get(task_id))
 
 
-def _execute(step):
-    """Dispatch an approved step to the owning agent daemon (Phase 5, 5.3).
+def _execute(step, task=None):
+    """Dispatch an approved step to the owning agent daemon or connector.
 
-    Previously a pass-through stand-in; now the task-runner routes real
-    computer-agent tools (incl. start_remote_session + remote_input) and the
-    engine verifies the agent's reported outcome before marking the step done.
+    `task` is threaded through from the engine so Execute-tier connector steps
+    (smart_home.control, …) can prove their approval belongs to this task's
+    step before anything external fires.
     """
     from .executor import make_executor
 
-    return make_executor()(step)
+    return make_executor()(step, task=task)
 
 
 @app.post("/tasks/{task_id}/run")

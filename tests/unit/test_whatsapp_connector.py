@@ -11,8 +11,11 @@ from __future__ import annotations
 import pytest
 
 from integrations.base import (
+    ConnectionMissingError,
+    ConnectorError,
     ExpiredSessionError,
     OAuthScopes,
+    PermissionNotApprovedError,
     RateLimitError,
 )
 from integrations.mock_providers.whatsapp_mock import MockWhatsAppSession
@@ -96,11 +99,160 @@ def test_digest_flags_not_silently_omits(wa: WhatsAppConnector, session: MockWha
     assert digest.total == len(digest.entries)  # nothing silently omitted
 
 
-def test_digest_is_read_only_no_send_path(wa: WhatsAppConnector) -> None:
+def test_scopes_and_tools_are_separated(wa: WhatsAppConnector) -> None:
     scopes: OAuthScopes = wa.declared_scopes()
-    assert scopes.write == []
+    assert scopes.read == ["browser-session:read-messages"]
+    assert scopes.write == ["browser-session:send-messages"]
     assert "whatsapp.read_digest" in wa.tools
-    assert not any("send" in t for t in wa.tools)
+    assert "whatsapp.send_message" in wa.tools
+
+
+# ── send path (execute-tier, approval-gated, idempotent) ─────────────────────
+
+
+def test_send_requires_approved_ledger(wa: WhatsAppConnector, session: MockWhatsAppSession) -> None:
+    from packages.shared.permission_engine import PermissionEngine
+    from packages.shared.schemas import ToolRegistration, RiskTier
+
+    PermissionEngine.reset()
+    PermissionEngine.register(
+        ToolRegistration(
+            tool_name="whatsapp.send_message",
+            tier=RiskTier.EXECUTE,
+            confirmation_required=True,
+            description="send",
+            diff_card_fields=["recipient", "recipient_identity", "content", "channel"],
+        )
+    )
+    session.complete_scan("sess-send")
+    wa.complete_link("sess-send")
+    with pytest.raises(PermissionNotApprovedError):
+        wa.send_message(
+            "sess-send",
+            recipient="Mum",
+            content="On my way!",
+            idempotency_key="key-1",
+            approval_verifier=lambda: False,
+        )
+    assert session.sent == []  # nothing transmitted without approval
+
+
+def test_send_fires_with_approved_ledger(wa: WhatsAppConnector, session: MockWhatsAppSession) -> None:
+    from packages.shared.permission_engine import PermissionEngine
+    from packages.shared.schemas import ToolRegistration, RiskTier
+
+    PermissionEngine.reset()
+    PermissionEngine.register(
+        ToolRegistration(
+            tool_name="whatsapp.send_message",
+            tier=RiskTier.EXECUTE,
+            confirmation_required=True,
+            description="send",
+            diff_card_fields=["recipient", "recipient_identity", "content", "channel"],
+        )
+    )
+    session.complete_scan("sess-send2")
+    wa.complete_link("sess-send2")
+    sent = wa.send_message(
+        "sess-send2",
+        recipient="Mum",
+        content="On my way!",
+        idempotency_key="key-2",
+        approval_verifier=lambda: True,
+    )
+    assert sent.replay is False
+    assert sent.recipient_identity == "Mum <+447700900001>"  # resolved, not typed
+    assert sent.channel == "whatsapp"
+    assert session.sent[0]["recipient_identity"] == "Mum <+447700900001>"
+    assert sent.message_id == "sent_1"
+
+
+def test_send_idempotency_key_replays_prior_result(
+    wa: WhatsAppConnector, session: MockWhatsAppSession
+) -> None:
+    from packages.shared.permission_engine import PermissionEngine
+    from packages.shared.schemas import ToolRegistration, RiskTier
+
+    PermissionEngine.reset()
+    PermissionEngine.register(
+        ToolRegistration(
+            tool_name="whatsapp.send_message",
+            tier=RiskTier.EXECUTE,
+            confirmation_required=True,
+            description="send",
+            diff_card_fields=["recipient", "recipient_identity", "content", "channel"],
+        )
+    )
+    session.complete_scan("sess-send3")
+    wa.complete_link("sess-send3")
+    first = wa.send_message(
+        "sess-send3",
+        recipient="Mum",
+        content="On my way!",
+        idempotency_key="key-3",
+        approval_verifier=lambda: True,
+    )
+    second = wa.send_message(
+        "sess-send3",
+        recipient="Mum",
+        content="On my way!",
+        idempotency_key="key-3",
+        approval_verifier=lambda: True,
+    )
+    assert second.replay is True
+    assert second.message_id == first.message_id
+    assert len(session.sent) == 1  # duplicate retry never double-sends
+
+
+def test_send_ambiguous_recipient_is_loud(wa: WhatsAppConnector, session: MockWhatsAppSession) -> None:
+    from packages.shared.permission_engine import PermissionEngine
+    from packages.shared.schemas import ToolRegistration, RiskTier
+
+    PermissionEngine.reset()
+    PermissionEngine.register(
+        ToolRegistration(
+            tool_name="whatsapp.send_message",
+            tier=RiskTier.EXECUTE,
+            confirmation_required=True,
+            description="send",
+            diff_card_fields=["recipient", "recipient_identity", "content", "channel"],
+        )
+    )
+    session.complete_scan("sess-send4")
+    wa.complete_link("sess-send4")
+    with pytest.raises(ConnectorError, match="ambiguous"):
+        wa.send_message(
+            "sess-send4",
+            recipient="Alex",
+            content="Hi",
+            idempotency_key="key-4",
+            approval_verifier=lambda: True,
+        )
+    assert session.sent == []
+
+
+def test_send_refuses_empty_content(wa: WhatsAppConnector, session: MockWhatsAppSession) -> None:
+    session.complete_scan("sess-send5")
+    wa.complete_link("sess-send5")
+    with pytest.raises(ConnectorError, match="empty message"):
+        wa.send_message(
+            "sess-send5",
+            recipient="Mum",
+            content="   ",
+            idempotency_key="key-5",
+            approval_verifier=lambda: True,
+        )
+
+
+def test_send_unlinked_session_is_loud(wa: WhatsAppConnector) -> None:
+    with pytest.raises(ConnectionMissingError):
+        wa.send_message(
+            "never-linked",
+            recipient="Mum",
+            content="Hi",
+            idempotency_key="key-6",
+            approval_verifier=lambda: True,
+        )
 
 
 # ── failure handling ─────────────────────────────────────────────────────────

@@ -25,7 +25,7 @@ def exec_step(tool="system.send_message", risk=RiskTier.EXECUTE, **args) -> Task
     return TaskStep(agent="system", tool=tool, risk_level=risk, result={"args": args})
 
 def record_calls(ledger=None):
-    def _execute(step):
+    def _execute(step, task=None):
         if ledger is not None:
             ledger.append(step.idempotency_key)
         return {"ok": True}
