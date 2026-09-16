@@ -26,7 +26,6 @@ from integrations.reservations.connector import (
     SlotSearchResult,
 )
 from integrations.token_vault import TokenVault
-
 from packages.shared.permission_engine import PermissionEngine
 from packages.shared.schemas import RiskTier, ToolRegistration
 

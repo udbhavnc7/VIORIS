@@ -18,8 +18,8 @@ from integrations.base import (
 from integrations.calendar.connector import (
     CalendarConnector,
     CalendarDigest,
-    _urgency,
     _attendee_names,
+    _urgency,
 )
 from integrations.mock_providers.calendar_mock import MockCalendarTransport
 from integrations.token_vault import TokenVault

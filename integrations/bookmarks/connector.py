@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -102,7 +102,7 @@ def _dt_from_chromium(epoch_micros: str | None) -> datetime | None:
     if not epoch_micros:
         return None
     try:
-        return datetime.fromtimestamp(int(epoch_micros) / 1_000_000, tz=timezone.utc)
+        return datetime.fromtimestamp(int(epoch_micros) / 1_000_000, tz=UTC)
     except (ValueError, OverflowError):
         return None
 

@@ -1,9 +1,10 @@
+import pytest
+
 from apps.desktop_agent.app.commands import handle
 from apps.desktop_agent.app.executor import (
-    PermissionBlockedError,
     Executor,
+    PermissionBlockedError,
 )
-import pytest
 
 # Ensure the Phase 1 registry is populated (idempotent).
 from packages.shared.permission_engine import PermissionEngine, register_phase1_tools

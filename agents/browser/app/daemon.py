@@ -8,8 +8,8 @@ Run from the repo root:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI
 from pydantic import BaseModel

@@ -135,7 +135,7 @@ class AbstractConnector(abc.ABC):
             raise ExpiredSessionError(f"{identity} has no refresh token — reconnect required")
         try:
             raw = self.refresh_access_token(refresh_token)
-        except Exception as exc:  # noqa: BLE001 - provider failure -> explicit expiry
+        except Exception as exc:
             self._vault.mark_expired(self.service, identity)
             raise ExpiredSessionError(f"{identity} refresh failed: {exc}") from exc
         # Google's refresh response usually omits the refresh token; preserve it.
@@ -166,7 +166,7 @@ class AbstractConnector(abc.ABC):
         nothing external happens."""
         try:
             reg = PermissionEngine.classify(tool)
-        except Exception as exc:  # noqa: BLE001 - unknown tool must never run
+        except Exception as exc:
             raise PermissionNotApprovedError(f"{tool} is not registered") from exc
         if reg.tier.value != tier:
             raise PermissionNotApprovedError(

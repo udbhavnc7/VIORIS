@@ -8,10 +8,9 @@ action/surface that is not registered before anything runs.
 import pytest
 from fastapi.testclient import TestClient
 
-from packages.shared.permission_engine import PermissionEngine, register_phase3_tools
-
 from agents.computer.app.agent import ComputerAgent, PermissionBlockedError
 from agents.computer.app.daemon import app
+from packages.shared.permission_engine import PermissionEngine, register_phase3_tools
 
 register_phase3_tools()
 
@@ -69,7 +68,7 @@ def test_open_app_requires_name(client):
 
 def test_permission_engine_blocks_unregistered_computer_step(tmp_path):
     """CONTRIBUTING gate: an unregistered stop surface never fires."""
-    agent = ComputerAgent(screenshot_dir=tmp_path, list_windows_fn=lambda: [])
+    agent = ComputerAgent(screenshot_dir=tmp_path, list_windows_fn=list)
     with pytest.raises(PermissionBlockedError) as ei:
         agent.classify_with_gate("computer.burn_disk")
     assert "not registered" in str(ei.value)
@@ -115,7 +114,7 @@ def test_remote_lock_locks_then_ends_session(client, monkeypatch):
     # Re-slot the agent so the injected lock backend is used and the lock is verifiable.
     computer_daemon._agent = ComputerAgent(
         screenshot_dir=None,
-        list_windows_fn=lambda: [],
+        list_windows_fn=list,
         screenshot_fn=(lambda p: (p.write_bytes(b"\x89PNG" + b"\x00" * 8), p)[1]),
         lock_workstation_fn=fake_lock,
     )

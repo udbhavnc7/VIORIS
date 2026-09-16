@@ -13,14 +13,13 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
+import integrations.whatsapp.api as wa_api
+from integrations.mock_providers.whatsapp_mock import MockWhatsAppSession
 from packages.shared.permission_engine import (
     PermissionEngine,
     RiskTier,
     register_phase6_connector_tools,
 )
-
-import integrations.whatsapp.api as wa_api
-from integrations.mock_providers.whatsapp_mock import MockWhatsAppSession
 
 
 def _make_client(session: MockWhatsAppSession) -> TestClient:

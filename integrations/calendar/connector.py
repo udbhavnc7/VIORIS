@@ -14,7 +14,7 @@ injected transport so tests use a scripted mock.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 
 from integrations.base import (
@@ -88,7 +88,7 @@ def _urgency(entry: dict) -> str:
     start = entry.get("start", {}).get("dateTime")
     if start:
         try:
-            soon_hours = (datetime.fromisoformat(start) - datetime.now(timezone.utc)).total_seconds() / 3600
+            soon_hours = (datetime.fromisoformat(start) - datetime.now(UTC)).total_seconds() / 3600
         except ValueError:
             soon_hours = None
     high = ("urgent", "asap", "deadline", "final", "exam", "due today", "important")
@@ -191,7 +191,7 @@ class HttpxCalendarTransport:
             "maxResults": str(max_results),
             "orderBy": "startTime",
             "singleEvents": "true",
-            "timeMin": time_min or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timeMin": time_min or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         resp = self._httpx.get(
             f"{_CALENDAR_API}/calendars/primary/events",
@@ -245,7 +245,7 @@ class CalendarConnector(AbstractConnector):
     def fetch_upcoming_digest(self, identity: str, hours: int = 72, max_results: int = 10) -> CalendarDigest:
         """Upcoming events visible in the linked calendar. Observe-tier."""
         entry = self._vault.require_entry(self.service, identity)
-        time_min = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        time_min = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         listing = self.authenticated_request(
             identity,
             lambda at: self.transport.list_upcoming(at, max_results=max_results, time_min=time_min),
@@ -278,8 +278,8 @@ class CalendarConnector(AbstractConnector):
 def _parse_start(raw: dict) -> datetime:
     iso = raw.get("start", {}).get("dateTime") or raw.get("start", {}).get("date")
     if not iso:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     try:
         return datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except ValueError:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)

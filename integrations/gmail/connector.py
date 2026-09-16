@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from integrations.base import (
@@ -260,7 +260,7 @@ class GmailConnector(AbstractConnector):
         """Unread digest for the last `hours`. Observe-tier: no approval needed,
         changes nothing externally."""
         entry = self._vault.require_entry(self.service, identity)
-        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y/%m/%d")
+        since = (datetime.now(UTC) - timedelta(hours=hours)).strftime("%Y/%m/%d")
         query = f"is:unread newer_than:{hours}h after:{since}"
         listing = self.authenticated_request(
             identity,
@@ -289,7 +289,7 @@ class GmailConnector(AbstractConnector):
                     snippet=snippet[:180],
                     asks=_extract_asks(subject, snippet),
                     dates=_extract_dates(subject, snippet),
-                    received_at=datetime.now(timezone.utc),
+                    received_at=datetime.now(UTC),
                 )
             )
         return MailDigest(

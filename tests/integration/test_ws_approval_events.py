@@ -3,9 +3,11 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from packages.shared.permission_engine import PermissionEngine, register_phase1_tools
-from packages.shared.permission_engine import register_phase2_tools
-
+from packages.shared.permission_engine import (
+    PermissionEngine,
+    register_phase1_tools,
+    register_phase2_tools,
+)
 from services.task_runner.app.api import app
 
 
@@ -21,11 +23,11 @@ def _full_registry():
 @pytest.fixture
 def client():
     # Point the API at a throwaway DB so tests don't write real state.
-    from services.task_runner.app import api
-    from services.task_runner.app.manager import TaskManager
-
     import tempfile
     from pathlib import Path
+
+    from services.task_runner.app import api
+    from services.task_runner.app.manager import TaskManager
 
     api._manager = TaskManager(Path(tempfile.mkdtemp()) / "t.db")
     with TestClient(app) as c:

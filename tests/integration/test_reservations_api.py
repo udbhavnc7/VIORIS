@@ -14,15 +14,14 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
+import integrations.reservations.api as res_api
+from integrations.mock_providers.reservations_mock import MockReservationsTransport
 from packages.shared.permission_engine import (
     PermissionEngine,
     RiskTier,
     register_phase6_connector_tools,
 )
 from packages.shared.schemas import ToolRegistration
-
-import integrations.reservations.api as res_api
-from integrations.mock_providers.reservations_mock import MockReservationsTransport
 
 
 def _make_client(transport: MockReservationsTransport) -> TestClient:

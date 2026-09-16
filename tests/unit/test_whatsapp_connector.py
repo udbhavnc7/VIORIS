@@ -9,6 +9,7 @@ rate-limit and dead-session handling.
 from __future__ import annotations
 
 import pytest
+from cryptography.fernet import Fernet
 
 from integrations.base import (
     ConnectionMissingError,
@@ -24,12 +25,10 @@ from integrations.whatsapp.connector import (
     RawMessage,
     WhatsAppConnector,
     WhatsAppDigest,
-    _one_line_summary,
     _extract_ask,
     _flag_if_inaccessible,
+    _one_line_summary,
 )
-
-from cryptography.fernet import Fernet
 
 
 @pytest.fixture()
@@ -112,7 +111,7 @@ def test_scopes_and_tools_are_separated(wa: WhatsAppConnector) -> None:
 
 def test_send_requires_approved_ledger(wa: WhatsAppConnector, session: MockWhatsAppSession) -> None:
     from packages.shared.permission_engine import PermissionEngine
-    from packages.shared.schemas import ToolRegistration, RiskTier
+    from packages.shared.schemas import RiskTier, ToolRegistration
 
     PermissionEngine.reset()
     PermissionEngine.register(
@@ -139,7 +138,7 @@ def test_send_requires_approved_ledger(wa: WhatsAppConnector, session: MockWhats
 
 def test_send_fires_with_approved_ledger(wa: WhatsAppConnector, session: MockWhatsAppSession) -> None:
     from packages.shared.permission_engine import PermissionEngine
-    from packages.shared.schemas import ToolRegistration, RiskTier
+    from packages.shared.schemas import RiskTier, ToolRegistration
 
     PermissionEngine.reset()
     PermissionEngine.register(
@@ -171,7 +170,7 @@ def test_send_idempotency_key_replays_prior_result(
     wa: WhatsAppConnector, session: MockWhatsAppSession
 ) -> None:
     from packages.shared.permission_engine import PermissionEngine
-    from packages.shared.schemas import ToolRegistration, RiskTier
+    from packages.shared.schemas import RiskTier, ToolRegistration
 
     PermissionEngine.reset()
     PermissionEngine.register(
@@ -206,7 +205,7 @@ def test_send_idempotency_key_replays_prior_result(
 
 def test_send_ambiguous_recipient_is_loud(wa: WhatsAppConnector, session: MockWhatsAppSession) -> None:
     from packages.shared.permission_engine import PermissionEngine
-    from packages.shared.schemas import ToolRegistration, RiskTier
+    from packages.shared.schemas import RiskTier, ToolRegistration
 
     PermissionEngine.reset()
     PermissionEngine.register(

@@ -74,7 +74,7 @@ class DocumentsAgent:
             for match in base.rglob("*"):
                 if match.is_file() and query.lower() in match.name.lower():
                     results.append(str(match.relative_to(base)))
-        except OSError as exc:  # noqa: BLE001
+        except OSError as exc:
             return DocsOutcome(
                 tool="file.search_files", ok=False, note="search failed", error=str(exc)
             )
@@ -94,7 +94,7 @@ class DocumentsAgent:
             return DocsOutcome(tool="file.read_file", ok=False, note="not a file")
         try:
             text = target.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:  # noqa: BLE001
+        except OSError as exc:
             return DocsOutcome(tool="file.read_file", ok=False, note="read failed", error=str(exc))
         self._executions.append("file.read")
         return DocsOutcome(
@@ -115,7 +115,7 @@ class DocumentsAgent:
             )
         try:
             src.rename(dst)
-        except OSError as exc:  # noqa: BLE001
+        except OSError as exc:
             return DocsOutcome(tool="file.move", ok=False, note="move failed", error=str(exc))
         self._executions.append("file.move")
         return DocsOutcome(
@@ -133,7 +133,7 @@ class DocumentsAgent:
             return self._refuse("file.rename", "outside-allowlist", {"path": str(new_path)})
         try:
             target.rename(new_path)
-        except OSError as exc:  # noqa: BLE001
+        except OSError as exc:
             return DocsOutcome(tool="file.rename", ok=False, note="rename failed", error=str(exc))
         self._executions.append("file.rename")
         return DocsOutcome(tool="file.rename", ok=True, note="renamed", detail={"path": path, "new_name": new_name})
@@ -149,7 +149,7 @@ class DocumentsAgent:
             return DocsOutcome(tool="file.delete", ok=False, note="no such file")
         try:
             target.unlink()
-        except OSError as exc:  # noqa: BLE001
+        except OSError as exc:
             return DocsOutcome(tool="file.delete", ok=False, note="delete failed", error=str(exc))
         self._executions.append("file.delete")
         # The caller must still honor the Critical gate (2FA + cooldown).

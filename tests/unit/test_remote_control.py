@@ -86,8 +86,8 @@ class TestRemoteControlGating:
 
 class TestTaskRunnerExecutor:
     def test_unknown_tool_refused(self):
-        from services.task_runner.app.executor import make_executor
         from packages.shared.schemas import TaskStep
+        from services.task_runner.app.executor import make_executor
 
         step = TaskStep(agent="computer", tool="computer.something_new", risk_level="execute")
         step.result = {"args": {}}
@@ -103,8 +103,8 @@ class TestTaskRunnerExecutor:
             "_call_computer",
             lambda tool, args, base: captured.setdefault("calls", []).append((tool, args, base)) or {"ok": True, "result": {}},
         )
-        from services.task_runner.app.executor import make_executor
         from packages.shared.schemas import TaskStep
+        from services.task_runner.app.executor import make_executor
 
         step = TaskStep(agent="computer", tool="computer.start_remote_session", risk_level="execute")
         step.result = {"args": {"device_id": "phone-1", "timeout_minutes": 5}}

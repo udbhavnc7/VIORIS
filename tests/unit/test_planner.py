@@ -5,7 +5,6 @@ from packages.shared.permission_engine import (
     register_phase1_tools,
     register_phase6_connector_tools,
 )
-
 from services.orchestrator.app.llm_client import (
     OllamaBackend,
     PlannerBackendError,

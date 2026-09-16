@@ -20,7 +20,8 @@ from __future__ import annotations
 import pytest
 import requests
 
-from tests.integration._server import Server as _Server, free_port
+from tests.integration._server import Server as _Server
+from tests.integration._server import free_port
 
 
 @pytest.fixture()
@@ -54,15 +55,30 @@ def full_stack(tmp_path, monkeypatch):
 
     monkeypatch.setenv("VIORUS_COMPUTER_URL", f"http://127.0.0.1:{computer_port}")
 
+    from packages.shared.permission_engine import (
+        PermissionEngine,
+        register_phase1_tools,
+        register_phase3_tools,
+        register_phase5_remote_tools,
+    )
+
+    PermissionEngine.reset()
+    register_phase1_tools()
+    register_phase3_tools()
+    register_phase5_remote_tools()
+
     services = {
         "computer": _Server(computer_daemon.app, computer_port, probe_path="/windows"),
         "task_runner": _Server(_task_runner_app(tmp_path), task_runner_port, probe_path="/tasks"),
         "gateway": _Server(_gateway_app(monkeypatch, task_runner_port, computer_port), gateway_port),
     }
-    for name, svc in services.items():
+    for svc in services.values():
         svc.start()
-    yield {"ports": services, "computer": computer_port, "gateway": gateway_port,
-           "task_runner": task_runner_port}
+    try:
+        yield {"ports": services, "computer": computer_port, "gateway": gateway_port,
+               "task_runner": task_runner_port}
+    finally:
+        PermissionEngine.reset()
 
 
 def _task_runner_app(tmp_path):

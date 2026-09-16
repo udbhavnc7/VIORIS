@@ -25,7 +25,6 @@ from integrations.telephony.connector import (
     _draft_talking_points,
 )
 from integrations.token_vault import TokenVault
-
 from packages.shared.permission_engine import PermissionEngine
 from packages.shared.schemas import RiskTier, ToolRegistration
 

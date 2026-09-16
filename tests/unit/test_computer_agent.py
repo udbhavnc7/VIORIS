@@ -4,11 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from packages.shared.permission_engine import PermissionEngine, register_phase3_tools
-
 from agents.computer.app.agent import ComputerAgent, PermissionBlockedError
 from agents.computer.app.vision import VisionError
 from agents.computer.app.windows import WindowLookupError
+from packages.shared.permission_engine import PermissionEngine, register_phase3_tools
 
 register_phase3_tools()
 

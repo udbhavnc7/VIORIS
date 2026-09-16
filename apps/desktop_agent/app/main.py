@@ -46,7 +46,7 @@ def print_registry() -> None:
         result = PermissionEngine.classify(reg.tool_name)
         print(
             f"  {result.tool_name:<22} tier={result.tier.value:<9} "
-            f"confirmation={str(result.confirmation_required):<5}"
+            f"confirmation={result.confirmation_required!s:<5}"
         )
 
 

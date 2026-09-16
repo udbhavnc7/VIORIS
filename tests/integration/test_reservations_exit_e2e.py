@@ -26,7 +26,6 @@ from packages.shared.permission_engine import (
     PermissionEngine,
     register_phase6_connector_tools,
 )
-
 from tests.integration._server import Server, free_port
 
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -37,7 +37,7 @@ PERMISSION_EXPLANATION = (
 _SESSION_SCOPE = "browser-profile:read-history"
 
 #: Chromium timestamps are microseconds since 1601-01-01 (Windows epoch).
-_CHROMIUM_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
+_CHROMIUM_EPOCH = datetime(1601, 1, 1, tzinfo=UTC)
 
 
 @dataclass
@@ -70,7 +70,7 @@ class LocalHistoryTransport:
         if not path.exists():
             raise ConnectorError(f"history file not found: {source}")
         since_chromium = int(
-            (datetime.now(timezone.utc) - timedelta(hours=hours) - _CHROMIUM_EPOCH).total_seconds() * 1_000_000
+            (datetime.now(UTC) - timedelta(hours=hours) - _CHROMIUM_EPOCH).total_seconds() * 1_000_000
         )
         try:
             # mode=ro: this connector can never write to the profile.

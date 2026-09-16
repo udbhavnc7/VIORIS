@@ -219,7 +219,7 @@ def _call_computer(tool: str, args: dict, base: str) -> dict:
                 resp = client.post(url, json=payload)
             else:
                 resp = client.get(url)
-    except httpx.RequestError as exc:  # noqa: BLE001
+    except httpx.RequestError as exc:
         raise RuntimeError(f"agent daemon unreachable for {tool}: {exc}") from exc
 
     body = _parse(resp)
@@ -249,7 +249,7 @@ def _call_smart_home(step, task, args: dict, base: str) -> dict:
         try:
             with httpx.Client(timeout=30) as client:
                 resp = client.get(f"{base}/status", params=params)
-        except httpx.RequestError as exc:  # noqa: BLE001
+        except httpx.RequestError as exc:
             raise RuntimeError(f"smart-home connector unreachable for {tool}: {exc}") from exc
         body = _parse(resp)
         if resp.status_code >= 400:
@@ -271,7 +271,7 @@ def _call_smart_home(step, task, args: dict, base: str) -> dict:
         try:
             with httpx.Client(timeout=30) as client:
                 resp = client.post(f"{base}/control", json=payload)
-        except httpx.RequestError as exc:  # noqa: BLE001
+        except httpx.RequestError as exc:
             raise RuntimeError(f"smart-home connector unreachable for {tool}: {exc}") from exc
         body = _parse(resp)
         if resp.status_code >= 400:
@@ -306,7 +306,7 @@ def _call_connector(step, task, args: dict, route: _Route, base: str) -> dict:
                     payload["task_id"] = task_id
                     payload["step_id"] = step.step_id
                 resp = client.post(f"{base}{route.path}", json=payload)
-    except httpx.RequestError as exc:  # noqa: BLE001
+    except httpx.RequestError as exc:
         raise RuntimeError(f"{route.service} connector unreachable for {tool}: {exc}") from exc
 
     body = _parse(resp)

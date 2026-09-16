@@ -30,7 +30,7 @@ class GuardrailConfig:
     shell_programs: tuple[str, ...] = ()
 
     @classmethod
-    def from_env(cls) -> "GuardrailConfig":
+    def from_env(cls) -> GuardrailConfig:
         dirs = tuple(
             Path(item).expanduser().resolve() for item in _split_list("VIORUS_ALLOWED_DIRS")
         )

@@ -22,7 +22,7 @@ import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from packages.shared.schemas import Memory, MemoryCategory
@@ -60,7 +60,7 @@ class StoreResult:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _row_to_memory(row: tuple) -> Memory:

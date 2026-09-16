@@ -7,16 +7,16 @@ injectable failures, so connector tests never touch a real browser profile.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from integrations.base import ConnectorError
 
-_CHROMIUM_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
+_CHROMIUM_EPOCH = datetime(1601, 1, 1, tzinfo=UTC)
 
 
 def _chromium_ts(hours_ago: float) -> int:
     return int(
-        (datetime.now(timezone.utc) - timedelta(hours=hours_ago) - _CHROMIUM_EPOCH).total_seconds() * 1_000_000
+        (datetime.now(UTC) - timedelta(hours=hours_ago) - _CHROMIUM_EPOCH).total_seconds() * 1_000_000
     )
 
 

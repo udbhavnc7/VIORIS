@@ -14,15 +14,14 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
+import integrations.smart_home.api as sh_api
+from integrations.mock_providers.smart_home_mock import MockSmartHomeTransport
 from packages.shared.permission_engine import (
     PermissionEngine,
     RiskTier,
     register_phase6_connector_tools,
 )
 from packages.shared.schemas import ToolRegistration
-
-import integrations.smart_home.api as sh_api
-from integrations.mock_providers.smart_home_mock import MockSmartHomeTransport
 
 
 def _make_client(transport: MockSmartHomeTransport) -> TestClient:

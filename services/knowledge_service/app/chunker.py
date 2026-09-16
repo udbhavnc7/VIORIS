@@ -9,7 +9,6 @@ from. Same text in → same chunks out (ingestion is idempotent).
 from __future__ import annotations
 
 import re
-
 from dataclasses import dataclass
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")

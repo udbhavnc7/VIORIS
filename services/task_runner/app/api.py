@@ -107,7 +107,7 @@ def start_task(task_id: str) -> dict:
 def pause_task(task_id: str) -> dict:
     try:
         return _task_dict(get_manager().pause(task_id))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
@@ -115,7 +115,7 @@ def pause_task(task_id: str) -> dict:
 def resume_task(task_id: str) -> dict:
     try:
         return _task_dict(get_manager().resume(task_id))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
@@ -128,7 +128,7 @@ def cancel_task(task_id: str) -> dict:
 def retry_step(task_id: str, step_id: str) -> dict:
     try:
         return _task_dict(get_manager().retry_step(task_id, step_id))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 

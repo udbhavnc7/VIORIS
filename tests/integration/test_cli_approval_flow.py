@@ -6,10 +6,12 @@ only registry-declared fields; and reject abandons the step forever.
 """
 
 
-from packages.shared.permission_engine import PermissionEngine, register_phase1_tools
-from packages.shared.permission_engine import register_phase2_tools
+from packages.shared.permission_engine import (
+    PermissionEngine,
+    register_phase1_tools,
+    register_phase2_tools,
+)
 from packages.shared.schemas import TaskStatus, TaskStep
-
 from services.task_runner.app.cli import default_execute
 from services.task_runner.app.manager import TaskManager
 

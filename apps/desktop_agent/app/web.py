@@ -18,8 +18,8 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from packages.shared.permission_engine import PermissionEngine
 from packages.shared.audit import GENESIS_HASH
+from packages.shared.permission_engine import PermissionEngine
 
 from .command_runner import run_command
 from .config import AgentConfig

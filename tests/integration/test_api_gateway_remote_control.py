@@ -67,7 +67,7 @@ def test_remote_endpoints_require_device_jwt(client):
 def test_screenshot_and_input_require_active_session(client, _stub_computer):
     """End-to-end via gateway: start -> active session -> screenshot/input.
     Session gating is exercised: without an active session, both refuse."""
-    device_id, jwt = _pair_and_get_jwt(client)
+    _device_id, jwt = _pair_and_get_jwt(client)
 
     no_active = {"session": None}
 

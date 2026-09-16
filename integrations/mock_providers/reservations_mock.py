@@ -10,7 +10,7 @@ silently — the connector gates it at Execute tier before this is reached).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from integrations.base import ExpiredSessionError, RateLimitError
 
@@ -27,7 +27,7 @@ class MockReservationsTransport:
         self.linked_sessions: set[str] = set()
         self.fail_next: str | None = None
         self.bookings: list[dict] = []
-        self._now = datetime.now(timezone.utc)
+        self._now = datetime.now(UTC)
 
     def link(self) -> dict:
         self.calls.append("link")

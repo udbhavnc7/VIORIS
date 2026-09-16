@@ -12,9 +12,10 @@ they like. Everything is local; nothing here talks to any account.
 
 from __future__ import annotations
 
+from packages.shared.schemas import TaskStatus
+
 from .commands import handle
 from .executor import PermissionBlockedError
-from packages.shared.schemas import TaskStatus
 
 
 def run_command(transcript: str, executor, store) -> dict:

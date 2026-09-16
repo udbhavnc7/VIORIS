@@ -2,10 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from packages.shared.permission_engine import PermissionEngine, register_phase1_tools
-from packages.shared.permission_engine import register_phase2_tools
+from packages.shared.permission_engine import (
+    PermissionEngine,
+    register_phase1_tools,
+    register_phase2_tools,
+)
 from packages.shared.schemas import RiskTier, TaskStatus, TaskStep
-
 from services.task_runner.app.manager import TaskManager
 
 register_phase1_tools()

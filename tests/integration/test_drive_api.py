@@ -13,14 +13,13 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
+import integrations.cloud_files.api as drive_api
+from integrations.mock_providers.drive_mock import MockDriveTransport
 from packages.shared.permission_engine import (
     PermissionEngine,
     RiskTier,
     register_phase6_connector_tools,
 )
-
-import integrations.cloud_files.api as drive_api
-from integrations.mock_providers.drive_mock import MockDriveTransport
 
 
 def _make_client(transport: MockDriveTransport) -> TestClient:

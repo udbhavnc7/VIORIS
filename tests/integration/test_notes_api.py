@@ -13,14 +13,13 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
+import integrations.notes.api as notes_api
+from integrations.mock_providers.notes_mock import MockNotesTransport
 from packages.shared.permission_engine import (
     PermissionEngine,
     RiskTier,
     register_phase6_connector_tools,
 )
-
-import integrations.notes.api as notes_api
-from integrations.mock_providers.notes_mock import MockNotesTransport
 
 
 def _make_client(transport: MockNotesTransport) -> TestClient:

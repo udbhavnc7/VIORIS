@@ -10,6 +10,7 @@ Chromium-shaped SQLite file (read-only URI, no writes, no network).
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC
 
 import pytest
 from cryptography.fernet import Fernet
@@ -166,7 +167,7 @@ def test_summary_falls_back_to_url() -> None:
 
 
 def _chromium_now_ts() -> int:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    epoch = datetime(1601, 1, 1, tzinfo=timezone.utc)
-    return int((datetime.now(timezone.utc) - epoch).total_seconds() * 1_000_000)
+    epoch = datetime(1601, 1, 1, tzinfo=UTC)
+    return int((datetime.now(UTC) - epoch).total_seconds() * 1_000_000)

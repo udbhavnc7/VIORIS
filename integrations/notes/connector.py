@@ -14,7 +14,7 @@ injected transport so tests use a scripted mock.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from integrations.base import (
@@ -79,7 +79,7 @@ def _updated_at(entry: dict) -> datetime:
     try:
         return datetime.fromisoformat((entry.get("modifiedTime") or "").replace("Z", "+00:00"))
     except ValueError:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 def _body_text(doc: dict) -> str:
@@ -231,7 +231,7 @@ class NotesConnector(AbstractConnector):
     def fetch_recent_digest(self, identity: str, hours: int = 168, max_results: int = 20) -> NotesDigest:
         """Recently edited notes + bodies. Observe-tier."""
         entry = self._vault.require_entry(self.service, identity)
-        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
+        since = (datetime.now(UTC) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
         query = f"modifiedTime >= '{since}' and trashed = false"
         listing = self.authenticated_request(
             identity,

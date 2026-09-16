@@ -15,9 +15,10 @@ Run:
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel

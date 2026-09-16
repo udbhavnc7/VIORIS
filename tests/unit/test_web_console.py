@@ -5,7 +5,6 @@ import pytest
 from apps.desktop_agent.app.command_runner import run_command
 from apps.desktop_agent.app.executor import Executor
 from apps.desktop_agent.app.store import TaskStore
-
 from packages.shared.permission_engine import PermissionEngine, register_phase1_tools
 
 register_phase1_tools()
@@ -69,9 +68,9 @@ class TestRunner:
         assert "didn't catch" in out["reply"]
 
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from apps.desktop_agent.app.web import app as web_app  # noqa: E402
+from apps.desktop_agent.app.web import app as web_app
 
 
 class TestWebConsole:

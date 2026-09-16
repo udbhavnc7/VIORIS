@@ -44,9 +44,8 @@ def test_exchange_rejects_wrong_device(client):
 
 
 def test_ws_rejects_bad_token(client):
-    with pytest.raises(Exception):
-        with client.websocket_connect("/ws/device?token=nonsense") as ws:
-            ws.receive_text()
+    with pytest.raises(Exception), client.websocket_connect("/ws/device?token=nonsense") as ws:
+        ws.receive_text()
 
 
 def test_ws_accepts_valid_device(client):

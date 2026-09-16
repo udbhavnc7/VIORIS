@@ -7,10 +7,9 @@ outside the granted roots or the command allow-list is REFUSED, never attempted.
 
 import pytest
 
-from packages.shared.permission_engine import PermissionEngine, register_phase3_files_tools
-
 from agents.documents.app.agent import DocumentsAgent, PermissionBlockedError
 from agents.documents.app.allowlist import GuardrailConfig, path_is_allowed
+from packages.shared.permission_engine import PermissionEngine, register_phase3_files_tools
 
 register_phase3_files_tools()
 

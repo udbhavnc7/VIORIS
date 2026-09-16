@@ -8,7 +8,7 @@ requested so tests can assert read-only discipline.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from integrations.base import ConnectorError, ExpiredSessionError, RateLimitError
 
@@ -92,7 +92,7 @@ class MockNotesTransport:
             raise ExpiredSessionError("mock 401 access token invalid")
 
 
-now = datetime.now(timezone.utc)
+now = datetime.now(UTC)
 _DEFAULT_NOTES = [
     {
         "id": "n1",

@@ -3,11 +3,10 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from packages.shared.permission_engine import PermissionEngine, register_phase3_files_tools
-
 from agents.documents.app.agent import DocumentsAgent
 from agents.documents.app.allowlist import GuardrailConfig
 from agents.documents.app.daemon import app
+from packages.shared.permission_engine import PermissionEngine, register_phase3_files_tools
 
 
 @pytest.fixture(autouse=True)

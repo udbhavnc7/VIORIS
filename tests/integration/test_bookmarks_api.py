@@ -13,14 +13,13 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
+import integrations.bookmarks.api as bm_api
+from integrations.mock_providers.bookmarks_mock import MockBookmarksTransport
 from packages.shared.permission_engine import (
     PermissionEngine,
     RiskTier,
     register_phase6_connector_tools,
 )
-
-import integrations.bookmarks.api as bm_api
-from integrations.mock_providers.bookmarks_mock import MockBookmarksTransport
 
 
 def _make_client(transport: MockBookmarksTransport, tmp_path=None) -> TestClient:

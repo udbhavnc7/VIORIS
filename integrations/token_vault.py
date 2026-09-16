@@ -77,7 +77,7 @@ class TokenVault:
             Path(key_file).parent.mkdir(parents=True, exist_ok=True)
             Path(key_file).write_bytes(raw)
             try:
-                os.chmod(Path(key_file), 0o600)  # noqa: PTH101 - owner read/write only
+                os.chmod(Path(key_file), 0o600)
             except OSError:
                 pass
         return raw

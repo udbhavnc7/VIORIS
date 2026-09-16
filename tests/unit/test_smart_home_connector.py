@@ -26,7 +26,6 @@ from integrations.smart_home.connector import (
     SmartHomeConnector,
 )
 from integrations.token_vault import TokenVault
-
 from packages.shared.permission_engine import PermissionEngine
 from packages.shared.schemas import RiskTier, ToolRegistration
 

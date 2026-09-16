@@ -13,14 +13,13 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
+import integrations.gmail.api as gmail_api
+from integrations.mock_providers.gmail_mock import MockGmailTransport
 from packages.shared.permission_engine import (
     PermissionEngine,
     RiskTier,
     register_phase6_connector_tools,
 )
-
-import integrations.gmail.api as gmail_api
-from integrations.mock_providers.gmail_mock import MockGmailTransport
 
 
 def _make_client(transport: MockGmailTransport) -> TestClient:

@@ -10,7 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from cryptography.fernet import Fernet
 
 from integrations.base import (
@@ -18,8 +17,13 @@ from integrations.base import (
     ExpiredSessionError,
     RateLimitError,
 )
-from integrations.gmail.connector import GmailConnector, MailDigest
-from integrations.gmail.connector import _urgency, _extract_asks, _extract_dates
+from integrations.gmail.connector import (
+    GmailConnector,
+    MailDigest,
+    _extract_asks,
+    _extract_dates,
+    _urgency,
+)
 from integrations.mock_providers.gmail_mock import MockGmailTransport
 from integrations.token_vault import TokenVault
 

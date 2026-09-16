@@ -3,7 +3,6 @@
 import pytest
 
 from packages.shared.schemas import MemoryCategory
-
 from services.memory_service.app.store import MemoryStore
 
 

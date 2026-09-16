@@ -11,7 +11,7 @@ session (ambiguous names raise, sends record a message id).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from integrations.base import ConnectorError, ExpiredSessionError, RateLimitError
 from integrations.whatsapp.connector import RawMessage
@@ -30,7 +30,7 @@ class MockWhatsAppSession:
         self.linked_sessions: set[str] = set()
         self.fail_next: str | None = None
         self.sent: list[dict] = []
-        self._now = datetime.now(timezone.utc)
+        self._now = datetime.now(UTC)
 
     # ── transport surface ─────────────────────────────────────────────────
     def link(self) -> dict:
@@ -104,7 +104,7 @@ _CONTACTS = {
 }
 
 
-_NOW = datetime.now(timezone.utc)
+_NOW = datetime.now(UTC)
 _DEFAULT_MESSAGES = [
     RawMessage(
         message_id="w1",

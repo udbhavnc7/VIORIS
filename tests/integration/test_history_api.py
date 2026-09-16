@@ -14,14 +14,13 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
+import integrations.history.api as hist_api
+from integrations.mock_providers.history_mock import MockHistoryTransport
 from packages.shared.permission_engine import (
     PermissionEngine,
     RiskTier,
     register_phase6_connector_tools,
 )
-
-import integrations.history.api as hist_api
-from integrations.mock_providers.history_mock import MockHistoryTransport
 
 
 def _make_client(transport: MockHistoryTransport, tmp_path=None) -> TestClient:

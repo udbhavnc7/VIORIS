@@ -10,7 +10,7 @@ Run from the repo root (allow-lists come from env, see allowlist.py):
 
 from __future__ import annotations
 
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 from pydantic import BaseModel

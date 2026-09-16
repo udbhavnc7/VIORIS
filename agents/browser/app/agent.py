@@ -17,8 +17,8 @@ not try OCR solvers, hidden fields, headless-evasion, or credential stuffing.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from packages.shared.permission_engine import UnknownToolError
 

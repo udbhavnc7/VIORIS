@@ -13,14 +13,13 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
+import integrations.contacts.api as contacts_api
+from integrations.mock_providers.contacts_mock import MockContactsTransport
 from packages.shared.permission_engine import (
     PermissionEngine,
     RiskTier,
     register_phase6_connector_tools,
 )
-
-import integrations.contacts.api as contacts_api
-from integrations.mock_providers.contacts_mock import MockContactsTransport
 
 
 def _make_client(transport: MockContactsTransport) -> TestClient:

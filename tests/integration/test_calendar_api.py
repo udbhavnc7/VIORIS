@@ -13,14 +13,13 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
+import integrations.calendar.api as cal_api
+from integrations.mock_providers.calendar_mock import MockCalendarTransport
 from packages.shared.permission_engine import (
     PermissionEngine,
     RiskTier,
     register_phase6_connector_tools,
 )
-
-import integrations.calendar.api as cal_api
-from integrations.mock_providers.calendar_mock import MockCalendarTransport
 
 
 def _make_client(transport: MockCalendarTransport) -> TestClient:

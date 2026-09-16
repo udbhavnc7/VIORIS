@@ -3,11 +3,10 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from packages.shared.permission_engine import PermissionEngine, register_phase3_browser_tools
-
 from agents.browser.app.agent import BrowserAgent, PermissionBlockedError
 from agents.browser.app.daemon import app
 from agents.browser.app.driver import FakeDriver
+from packages.shared.permission_engine import PermissionEngine, register_phase3_browser_tools
 
 register_phase3_browser_tools()
 

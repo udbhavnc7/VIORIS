@@ -122,7 +122,7 @@ class VoiceLoop:
 
         try:
             transcript = self.stt.transcribe(audio)
-        except Exception as exc:  # noqa: BLE001 — keep the loop alive on STT failure
+        except Exception as exc:
             logger.exception("STT failed; %s", exc)
             transcript = ""
         logger.info("heard: %r", transcript)
@@ -177,7 +177,7 @@ class VoiceLoop:
         self.state.to_speaking()
         try:
             self.tts.synthesize_play(reply, interrupt_check=lambda: self.state.interrupt_raised())
-        except Exception as exc:  # noqa: BLE001 — keep the loop alive on TTS failure
+        except Exception as exc:
             if not isinstance(exc, TTSUnavailableError):
                 logger.exception("TTS failure; continuing")
             else:

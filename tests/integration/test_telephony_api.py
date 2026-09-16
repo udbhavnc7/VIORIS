@@ -15,15 +15,14 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
+import integrations.telephony.api as tel_api
+from integrations.mock_providers.telephony_mock import MockTelephonyTransport
 from packages.shared.permission_engine import (
     PermissionEngine,
     RiskTier,
     register_phase6_connector_tools,
 )
 from packages.shared.schemas import ToolRegistration
-
-import integrations.telephony.api as tel_api
-from integrations.mock_providers.telephony_mock import MockTelephonyTransport
 
 
 def _make_client(transport: MockTelephonyTransport) -> TestClient:

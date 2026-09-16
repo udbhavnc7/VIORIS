@@ -61,5 +61,5 @@ def default_ocr(image: Path, **_) -> str:
         ) from exc
     try:
         return pytesseract.image_to_string(Image.open(image), lang="eng")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise VisionError(f"OCR failed: {exc}") from exc

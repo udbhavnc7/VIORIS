@@ -38,7 +38,7 @@ class Server:
                 r = requests.get(f"http://127.0.0.1:{self.port}{self._probe}", timeout=1)
                 if 200 <= r.status_code < 600:
                     return
-            except requests.exceptions.RequestError:
+            except requests.exceptions.RequestException:
                 pass
             time.sleep(0.05)
         raise RuntimeError(f"server on :{self.port} did not become healthy")
