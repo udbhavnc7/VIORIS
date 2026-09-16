@@ -24,7 +24,7 @@ from typing import AsyncIterator
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -263,7 +263,10 @@ async def v1_stop(device: Device = Depends(_require_device)) -> dict:
     """Stop Everything: halt every non-terminal task AND kill this device's
     remote sessions, so no further laptop input can flow. Both are audited by
     the task-runner / computer agent respectively."""
-    stop = await _proxy("POST", "/stop-everything", device)
+    try:
+        stop = await _proxy("POST", "/stop-everything", device)
+    except HTTPException:
+        stop = {"stopped": 0, "note": "task-runner unreachable"}
     try:
         ended = await _computer_request(
             "POST", "/remote/session/end", {"device_id": device.device_id}
