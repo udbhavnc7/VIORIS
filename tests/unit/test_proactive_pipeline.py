@@ -373,5 +373,39 @@ class TestDrivingWorkflow:
         # 4. Turn 3: user concludes the call
         turn3 = await pipeline.handle_phone_message("drive_01", "no that's all, bye")
         assert turn3["digest_status"] == "completed"
-        assert "later" in turn3["response_text"].lower()
+        assert "Talk to you later" in turn3["response_text"]
 
+    @pytest.mark.asyncio
+    async def test_voice_disambiguation_mail_workflow(self):
+        hub = FakeHub()
+        pipeline = ProactiveCallPipeline(hub=hub, gmail=FakeGmail(connected=False))
+        session = await pipeline._start_call("drive_02", driving_scenario=True)
+
+        # 1. User commands: open mail, send a mail to shravan saying Hi Sceptix
+        turn1 = await pipeline.handle_phone_message(
+            "drive_02",
+            "open mail, send a mail to shravan saying Hi Sceptix",
+        )
+        t1_resp = turn1["response_text"]
+        # Vioris detects multiple Shravans and asks for disambiguation
+        assert "Which Shravan?" in t1_resp
+        assert "Shravan G" in t1_resp
+        assert "Shravan GK" in t1_resp
+        assert "disambiguation" in session.metadata
+
+        # 2. User clarifies: shravan gk
+        turn2 = await pipeline.handle_phone_message("drive_02", "shravan gk")
+        t2_resp = turn2["response_text"]
+        assert "Sure" in t2_resp
+        assert "Shravan GK" in t2_resp
+        assert "Hi Sceptix" in t2_resp
+        assert turn2["action"] is not None
+        assert turn2["action"]["type"] == "send_mail"
+        assert turn2["action"]["recipient"] == "Shravan GK"
+        assert turn2["action"]["email"] == "shravan.gk@sceptix.com"
+        assert turn2["action"]["body"] == "Hi Sceptix"
+        assert "disambiguation" not in session.metadata
+
+        # 3. User finishes
+        turn3 = await pipeline.handle_phone_message("drive_02", "bye")
+        assert turn3["digest_status"] == "completed"

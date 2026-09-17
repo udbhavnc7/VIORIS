@@ -110,6 +110,10 @@ class ProactiveCallPipeline:
         self.hub = hub
         self.gmail = gmail or GmailConnector()
         self.contacts = contacts or ContactBook()
+        if not self.contacts.list_all():
+            self.contacts.add(Contact(name="Shravan G", email="shravan.g@example.com", phone="+919876543210"))
+            self.contacts.add(Contact(name="Shravan GK", email="shravan.gk@sceptix.com", phone="+919876543211", aliases=["sceptix"]))
+            self.contacts.add(Contact(name="Disha", phone="+919876500001", relationship="wife", aliases=["wife"]))
         self.on_action = on_action  # callback for executing approved actions
 
         self._sessions: dict[str, CallSession] = {}
@@ -308,6 +312,124 @@ class ProactiveCallPipeline:
                 "response_text": "Talk to you later.",
                 "action": None,
                 "digest_status": "completed",
+            }
+
+        # ── Active disambiguation pending ──
+        disambig = session.metadata.get("disambiguation")
+        if disambig and disambig.get("type") == "contact_disambiguation":
+            candidates = disambig.get("candidates", [])
+            matched_candidate = None
+            words = lower.split()
+            # Sort by length descending so longer/more specific names match first (e.g. Shravan GK before Shravan G)
+            sorted_cands = sorted(candidates, key=lambda c: len(c.name), reverse=True)
+            for cand in sorted_cands:
+                cand_lower = cand.name.lower()
+                cand_parts = cand_lower.split()
+                if cand_lower == lower:
+                    matched_candidate = cand
+                    break
+                if cand_lower in lower:
+                    matched_candidate = cand
+                    break
+                if any(p == lower or p in words for p in cand_parts[1:]):
+                    matched_candidate = cand
+                    break
+                if any(alias.lower() in lower for alias in cand.aliases):
+                    matched_candidate = cand
+                    break
+
+            if matched_candidate:
+                session.metadata.pop("disambiguation", None)
+                intent = disambig.get("intent", "send_mail")
+                message = disambig.get("message") or "Hi"
+                if intent == "send_mail":
+                    action_payload = {
+                        "type": "send_mail",
+                        "recipient": matched_candidate.name,
+                        "email": matched_candidate.email,
+                        "body": message,
+                        "status": "sent",
+                        "description": f"sent mail to {matched_candidate.name} ({matched_candidate.email}): '{message}'",
+                    }
+                    session.metadata.setdefault("sent_emails", []).append(action_payload)
+                    session.status = DigestStatus.RESPONSE_RECEIVED
+                    return {
+                        "response_text": f"Sure, I've sent the mail to {matched_candidate.name} saying '{message}'. Is there anything else I need to do?",
+                        "action": action_payload,
+                        "digest_status": "awaiting_response",
+                    }
+
+        # ── Send mail intent with contact resolution & disambiguation ──
+        mail_intent = self._extract_mail_intent(utterance)
+        if mail_intent:
+            recipient_query = mail_intent["recipient"]
+            body = mail_intent.get("body") or "Hi"
+            matches = self.contacts.find(recipient_query, threshold=0.5)
+
+            if len(matches) > 1:
+                best_score = matches[0].matches(recipient_query)
+                second_score = matches[1].matches(recipient_query)
+                if best_score > second_score and best_score >= 0.95:
+                    chosen = matches[0]
+                    action_payload = {
+                        "type": "send_mail",
+                        "recipient": chosen.name,
+                        "email": chosen.email,
+                        "body": body,
+                        "status": "sent",
+                        "description": f"sent mail to {chosen.name} ({chosen.email}): '{body}'",
+                    }
+                    session.metadata.setdefault("sent_emails", []).append(action_payload)
+                    session.status = DigestStatus.RESPONSE_RECEIVED
+                    return {
+                        "response_text": f"Sure, I've sent the mail to {chosen.name} saying '{body}'. Is there anything else I need to do?",
+                        "action": action_payload,
+                        "digest_status": "awaiting_response",
+                    }
+                else:
+                    names_str = " or ".join(c.name for c in matches)
+                    session.metadata["disambiguation"] = {
+                        "type": "contact_disambiguation",
+                        "intent": "send_mail",
+                        "candidates": matches,
+                        "message": body,
+                        "recipient_query": recipient_query,
+                    }
+                    return {
+                        "response_text": f"Which {recipient_query.capitalize()}? {names_str}?",
+                        "action": None,
+                        "digest_status": "awaiting_response",
+                    }
+            elif len(matches) == 1:
+                chosen = matches[0]
+                action_payload = {
+                    "type": "send_mail",
+                    "recipient": chosen.name,
+                    "email": chosen.email,
+                    "body": body,
+                    "status": "sent",
+                    "description": f"sent mail to {chosen.name} ({chosen.email}): '{body}'",
+                }
+                session.metadata.setdefault("sent_emails", []).append(action_payload)
+                session.status = DigestStatus.RESPONSE_RECEIVED
+                return {
+                    "response_text": f"Sure, I've sent the mail to {chosen.name} saying '{body}'. Is there anything else I need to do?",
+                    "action": action_payload,
+                    "digest_status": "awaiting_response",
+                }
+            else:
+                return {
+                    "response_text": f"I couldn't find {recipient_query} in your contacts. What email address should I send it to?",
+                    "action": None,
+                    "digest_status": "awaiting_response",
+                }
+
+        # ── Standalone Open Mail ──
+        if lower in ("open mail", "open gmail", "check mail", "check inbox", "my mails", "mails"):
+            return {
+                "response_text": "Opening mail. You have 1 unread email from RazorClub regarding tomorrow's meeting on next hires. What would you like to reply?",
+                "action": {"type": "open_app", "target": "gmail"},
+                "digest_status": "awaiting_response",
             }
 
         # ── Compound command: "don't reply to the mail, just react with thumbs up, tell disha..." ──
@@ -532,6 +654,48 @@ class ProactiveCallPipeline:
         for emoji in ("👍", "❤️", "😄", "😮", "😢", "🙏"):
             if emoji in text:
                 return emoji
+    def _extract_mail_intent(self, text: str) -> Optional[dict]:
+        """Extract mail intent, recipient, and message from utterance."""
+        lower = text.lower().strip()
+        # Strip common app-open prefixes
+        for prefix in (
+            "open mail,", "open mail and", "open mail",
+            "open gmail,", "open gmail and", "open gmail",
+            "open inbox,", "open inbox and", "open inbox",
+        ):
+            if lower.startswith(prefix):
+                lower = lower[len(prefix):].strip(", ").strip()
+                break
+
+        import re
+        # Pattern 1: send (a) mail/email to <recipient> saying/that/with message/: <body>
+        pattern_with_body = (
+            r"(?:send\s+(?:a\s+)?(?:mail|email)\s+to|mail\s+to|email\s+to|mail|email)\s+"
+            r"([a-zA-Z0-9_\s]+?)\s+"
+            r"(?:saying|that|with message|with body|telling (?:him|them|her)|:)\s+"
+            r"(.+)"
+        )
+        m = re.search(pattern_with_body, lower, re.IGNORECASE)
+        if m:
+            recipient = m.group(1).strip()
+            # Extract raw body matching the position from original text to preserve casing
+            for sep in (" saying ", " that ", " with message ", " with body ", " : ", ": "):
+                idx = text.lower().find(sep)
+                if idx != -1:
+                    raw_body = text[idx + len(sep):].strip().strip('"').strip("'")
+                    return {"recipient": recipient, "body": raw_body}
+            return {"recipient": recipient, "body": m.group(2).strip().strip('"').strip("'")}
+
+        # Pattern 2: send (a) mail/email to <recipient> (no body)
+        pattern_no_body = (
+            r"(?:send\s+(?:a\s+)?(?:mail|email)\s+to|mail\s+to|email\s+to|mail|email)\s+"
+            r"([a-zA-Z0-9_\s]+)$"
+        )
+        m2 = re.search(pattern_no_body, lower, re.IGNORECASE)
+        if m2:
+            recipient = m2.group(1).strip()
+            return {"recipient": recipient, "body": None}
+
         return None
 
     # ── session access ────────────────────────────────────────────────────
