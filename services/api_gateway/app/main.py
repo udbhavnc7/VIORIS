@@ -269,6 +269,11 @@ def _setup_hub_handlers(hub: WebSocketHub, pipeline) -> None:
     async def handle_voice(msg: WSMessage) -> None:
         """Phone sent a voice utterance during an active call."""
         call_id = msg.payload.get("call_id", "")
+        if not call_id and pipeline:
+            for sid, s in reversed(pipeline._sessions.items()):
+                if s.status.value in ("ringing", "active"):
+                    call_id = sid
+                    break
         text = msg.payload.get("text", "")
         if not call_id or not text:
             return
@@ -342,7 +347,7 @@ async def ws_device(websocket: WebSocket) -> None:
         except (InvalidDeviceTokenError, DeviceRevokedError):
             pass
 
-    client_id = device.device_id if device else f"anon-{id(websocket)}"
+    client_id = f"{device.device_id}-{id(websocket)}" if device else f"anon-{id(websocket)}"
     hub = get_hub()
 
     try:
@@ -463,10 +468,24 @@ async def connected_devices(device: Device = Depends(_require_device)) -> dict:
 
 
 @app.post("/v1/call/trigger")
-async def trigger_call(device: Device = Depends(_require_device)) -> dict:
-    """Manually trigger a proactive call to all connected phones."""
+async def trigger_call(
+    payload: dict | None = None,
+    device: Device = Depends(_require_device),
+) -> dict:
+    """Manually trigger a proactive call to all connected phones.
+    
+    Pass {"force": true} to bypass the digest schedule check.
+    """
+    force = (payload or {}).get("force", False)
     pipeline = get_pipeline()
-    call_id = await pipeline.tick()
+
+    if force:
+        # Bypass schedule — directly start a call
+        import uuid
+        call_id = str(uuid.uuid4())[:8]
+        await pipeline._start_call(call_id)
+    else:
+        call_id = await pipeline.tick()
     if call_id:
         return {
             "device": device.device_id,

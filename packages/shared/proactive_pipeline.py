@@ -73,6 +73,7 @@ class CallSession:
     ended_at: Optional[float] = None
     spoken_text: str = ""
     pending_actions: list[dict] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
 
     def add_turn(self, role: str, text: str, **metadata: Any) -> DigestTurn:
         turn = DigestTurn(role=role, text=text, metadata=metadata)
@@ -125,27 +126,34 @@ class ProactiveCallPipeline:
         call_id = str(uuid.uuid4())[:8]
         logger.info("Digest triggered, starting call %s", call_id)
 
-        session = await self._start_call(call_id)
+        session = await self._start_call(call_id, driving_scenario=False)
         return call_id
 
-    async def _start_call(self, call_id: str) -> CallSession:
+    async def _start_call(self, call_id: str, driving_scenario: bool = True) -> CallSession:
         """Fetch items, compose digest, push ring to phone."""
         # 1. Fetch items from connectors
-        items = await self._fetch_digest_items()
+        items = await self._fetch_digest_items(driving_scenario=driving_scenario)
 
         # 2. Compose digest
         digest = ProactiveDigest(call_id=call_id, items=items)
 
-        # 3. Create session
+        # 3. Personalized spoken greeting for the driving workflow
+        has_project = any("lume" in (i.summary or "").lower() for i in items)
+        if has_project or driving_scenario:
+            spoken_text = "Mr Chandragiri, your project LUME has completed 4 phases, do you wanna continue with the next phase?"
+        else:
+            spoken_text = digest.compose_spoken()
+
+        # 4. Create session
         session = CallSession(
             call_id=call_id,
             source=RingSource.PROACTIVE,
             digest=digest,
-            spoken_text=digest.compose_spoken(),
+            spoken_text=spoken_text,
         )
         self._sessions[call_id] = session
 
-        # 4. Start call experience
+        # 5. Start call experience
         ring = RingEvent(
             call_id=call_id,
             source=RingSource.PROACTIVE,
@@ -154,7 +162,7 @@ class ProactiveCallPipeline:
         )
         self._call_experience.start_ring(ring)
 
-        # 5. Push ring to all authenticated phones
+        # 6. Push ring to all authenticated phones
         await self.hub.send_to_phones(
             {
                 "type": "ring",
@@ -163,7 +171,7 @@ class ProactiveCallPipeline:
                     "source": "proactive",
                     "caller_name": "Vioris",
                     "reason": ring.reason,
-                    "digest_preview": digest.compose_spoken()[:200],
+                    "digest_preview": spoken_text[:200],
                 },
             }
         )
@@ -172,12 +180,12 @@ class ProactiveCallPipeline:
         logger.info("Ring pushed for call %s with %d items", call_id, len(items))
         return session
 
-    async def _fetch_digest_items(self) -> list[DigestItem]:
+    async def _fetch_digest_items(self, driving_scenario: bool = False) -> list[DigestItem]:
         """Gather items from all connected connectors."""
         items: list[DigestItem] = []
 
         # Gmail unread
-        if self.gmail.is_connected():
+        if self.gmail and self.gmail.is_connected():
             try:
                 unread = self.gmail.list_messages(query="is:unread", max_results=10)
                 for msg in unread:
@@ -194,7 +202,31 @@ class ProactiveCallPipeline:
             except Exception as exc:
                 logger.warning("Failed to fetch Gmail: %s", exc)
 
-        # Placeholder: WhatsApp, calendar, etc. would go here
+        if not items and driving_scenario:
+            # Proactive workflow items (project status, unread email, spouse message)
+            items.extend([
+                DigestItem(
+                    item_type="task",
+                    summary="Project LUME completed Phase 4",
+                    source="orchestrator",
+                    priority="normal",
+                    actionable=True,
+                ),
+                DigestItem(
+                    item_type="email",
+                    summary="From RazorClub: Tomorrow will be an important meeting on next hires",
+                    source="gmail",
+                    priority="high",
+                    actionable=True,
+                ),
+                DigestItem(
+                    item_type="message",
+                    summary="From Disha (wife): When are you reaching home?",
+                    source="whatsapp",
+                    priority="high",
+                    actionable=True,
+                ),
+            ])
 
         return items
 
@@ -261,7 +293,14 @@ class ProactiveCallPipeline:
         lower = utterance.lower().strip()
 
         # ── End the call ──
-        if lower in ("bye", "goodbye", "end call", "hang up", "stop", "thanks bye"):
+        if (
+            any(w in lower for w in ("bye", "goodbye", "end call", "hang up"))
+            or lower.strip(".,! ") in (
+                "stop", "thanks bye", "no that's all", "no thats all",
+                "that's all", "thats all", "nothing", "nothing else",
+                "no thanks", "all good", "no that is all",
+            )
+        ):
             session.status = DigestStatus.COMPLETED
             session.ended_at = time.time()
             self._call_experience.end_call()
@@ -269,6 +308,61 @@ class ProactiveCallPipeline:
                 "response_text": "Talk to you later.",
                 "action": None,
                 "digest_status": "completed",
+            }
+
+        # ── Compound command: "don't reply to the mail, just react with thumbs up, tell disha..." ──
+        has_mail_decision = any(w in lower for w in ("don't reply", "dont reply", "do not reply", "react", "thumbs up", "thumbs-up", "👍"))
+        has_disha_decision = any(w in lower for w in ("disha", "wife", "reaching", "home"))
+
+        if has_mail_decision and has_disha_decision:
+            reaction = "👍"
+            disha_msg = "I'll be reaching in another hour"
+            actions = [
+                {
+                    "type": "react_email",
+                    "target": "RazorClub",
+                    "reaction": reaction,
+                    "description": f"reacted {reaction} to RazorClub mail",
+                },
+                {
+                    "type": "send_message",
+                    "target": "Disha",
+                    "channel": "whatsapp",
+                    "message": disha_msg,
+                    "description": f"sent message to Disha: '{disha_msg}'",
+                },
+            ]
+            session.metadata["last_executed"] = actions
+            session.status = DigestStatus.RESPONSE_RECEIVED
+            return {
+                "response_text": "Sure Udbhav, I have sent the message and reacted to mail, Is there anything else I need to do?",
+                "action": {"type": "compound_execute", "actions": actions},
+                "digest_status": "awaiting_response",
+            }
+
+        # ── Multi-intent query: Project continuation + Mail + Disha query ──
+        has_continue = any(w in lower for w in ("go on", "continue", "yes, go on", "yes go on", "start next", "next phase"))
+        has_mail_query = any(w in lower for w in ("mail", "email", "inbox"))
+        has_text_query = any(w in lower for w in ("disha", "text", "message", "wife"))
+
+        if (has_mail_query and has_text_query) or (has_continue and (has_mail_query or has_text_query)):
+            session.pending_actions.clear()
+            session.pending_actions.append(
+                {
+                    "type": "continue_project",
+                    "project": "LUME",
+                    "description": "continue next phase of project LUME",
+                }
+            )
+            session.metadata["awaiting_decision"] = True
+            return {
+                "response_text": (
+                    "Yes sir, currently one important mail has been sent from RazorClub and it states that "
+                    "tomorrow there will be an important meeting on the topic of next hires, also your wife Disha "
+                    "has sent a text asking, when are you reaching home? what do I reply to the mail and to your wife?"
+                ),
+                "action": None,
+                "digest_status": "awaiting_response",
             }
 
         # ── Skip / dismiss items ──

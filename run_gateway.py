@@ -14,6 +14,7 @@ import sys
 
 # Ensure the project root is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("VIORIS_PAIRING_SECRET", "vioris_stable_dev_secret_key_2026_x89a")
 
 
 def main() -> None:

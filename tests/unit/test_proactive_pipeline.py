@@ -331,3 +331,47 @@ class TestDigestTurn:
     def test_with_metadata(self):
         turn = DigestTurn(role="laptop", text="digest", metadata={"type": "digest"})
         assert turn.metadata["type"] == "digest"
+
+
+# ── Driving Workflow E2E ─────────────────────────────────────────────────────
+
+
+class TestDrivingWorkflow:
+    @pytest.mark.asyncio
+    async def test_driving_conversation_lifecycle(self):
+        hub = FakeHub()
+        pipeline = ProactiveCallPipeline(hub=hub, gmail=FakeGmail(connected=False))
+        session = await pipeline._start_call("drive_01", driving_scenario=True)
+
+        # 1. Spoken greeting
+        assert "Mr Chandragiri" in session.spoken_text
+        assert "LUME" in session.spoken_text
+        assert "next phase" in session.spoken_text
+
+        # 2. Turn 1: user confirms continuation and asks about mails & Disha
+        turn1 = await pipeline.handle_phone_message(
+            "drive_01",
+            "Yes, go on, also tell me which mails have I recieved, are there any texts from Disha?",
+        )
+        t1_resp = turn1["response_text"]
+        assert "RazorClub" in t1_resp
+        assert "meeting" in t1_resp
+        assert "Disha" in t1_resp
+        assert "reaching home" in t1_resp
+        assert "what do I reply" in t1_resp
+
+        # 3. Turn 2: user replies with compound instruction
+        turn2 = await pipeline.handle_phone_message(
+            "drive_01",
+            "don't reply to the mail, just react with a thumbs up, and also tell Disha I'll be reaching in another hour",
+        )
+        t2_resp = turn2["response_text"]
+        assert "Sure Udbhav" in t2_resp
+        assert "reacted to mail" in t2_resp
+        assert "sent the message" in t2_resp
+
+        # 4. Turn 3: user concludes the call
+        turn3 = await pipeline.handle_phone_message("drive_01", "no that's all, bye")
+        assert turn3["digest_status"] == "completed"
+        assert "later" in turn3["response_text"].lower()
+

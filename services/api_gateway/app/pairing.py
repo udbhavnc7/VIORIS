@@ -162,8 +162,14 @@ class PairingStore:
             raise InvalidDeviceTokenError("token has no subject")
         with self._lock:
             device = self._devices.get(device_id)
-        if device is None:
-            raise InvalidDeviceTokenError("token issued to an unknown device")
+            if device is None:
+                # Validly signed token from our secret: restore device in memory
+                device = Device(
+                    device_id=device_id,
+                    name=payload.get("name", "Phone"),
+                    created_at=_now().isoformat(),
+                )
+                self._devices[device_id] = device
         if device.revoked:
             raise DeviceRevokedError(f"device '{device_id}' is revoked")
         return device

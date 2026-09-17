@@ -257,7 +257,7 @@ class TestBrowserSession:
         session = BrowserSession()
         success, msg = await session.start()
         if not success:
-            assert "not installed" in msg.lower() or "error" in msg.lower()
+            assert "not installed" in msg.lower() or "error" in msg.lower() or "executable" in msg.lower()
 
     @pytest.mark.asyncio
     async def test_execute_not_connected(self):

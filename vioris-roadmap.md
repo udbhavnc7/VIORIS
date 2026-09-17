@@ -1,4 +1,4 @@
-# Vioris — Roadmap to "Best Personal AI Agent" (Still $0)
+  # Vioris — Roadmap to "Best Personal AI Agent" (Still $0)
 
 You're closer than 25-30% would suggest. Phases 1-6 give you the *skeleton* of a real agentic OS — voice loop, planner, permission engine, memory, phone control, connectors. What's missing isn't more connectors. It's the handful of things that separate "a working agent" from "an agent you'd actually trust to touch your laptop while you're asleep." That's where the real 70% is.
 
