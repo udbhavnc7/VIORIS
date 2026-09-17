@@ -8,7 +8,7 @@ All models use Pydantic v2 for validation and serialization.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -51,7 +51,7 @@ class TaskStep(BaseModel):
     result: dict[str, Any] | None = None
     error: str | None = None
     idempotency_key: str = Field(default_factory=lambda: uuid.uuid4().hex)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class Task(BaseModel):
@@ -65,8 +65,8 @@ class Task(BaseModel):
     required_approvals: list[str] = Field(default_factory=list)
     result: dict[str, Any] | None = None
     audit_events: list[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 # ─── Audit Events ─────────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ class AuditEvent(BaseModel):
     detail: dict[str, Any] = Field(default_factory=dict)
     prev_hash: str | None = None
     hash: str = ""
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 # ─── Permission Engine Types ─────────────────────────────────────────────────
@@ -167,5 +167,5 @@ class Memory(BaseModel):
     source: str  # where this fact came from (e.g. 'user said on 2026-08-01', 'note:foo.md')
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     user_opted_in: bool = False  # required True before any sensitive write succeeds
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

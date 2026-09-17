@@ -17,10 +17,13 @@ JWT — the frontend never calls the task-runner directly.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+logger = logging.getLogger("vioris.gateway")
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
@@ -40,6 +43,9 @@ from .pairing import (
 )
 
 TASK_RUNNER_URL = os.getenv("VIORUS_TASK_RUNNER_URL", "http://127.0.0.1:8421")
+COMPUTER_URL = os.getenv("VIORUS_COMPUTER_URL", "http://127.0.0.1:8430")
+GATEWAY_HOST = os.getenv("VIORIS_API_HOST", "0.0.0.0")
+GATEWAY_PORT = int(os.getenv("VIORIS_API_PORT", "8420"))
 
 _store: PairingStore | None = None
 
@@ -105,14 +111,42 @@ def _device_dict(device) -> DeviceResponse:
 
 # ─── lifespan ────────────────────────────────────────────────────────────────
 
+_bg_task: asyncio.Task | None = None
+
+
+async def _digest_checker() -> None:
+    """Background loop: checks digest triggers every 60 seconds."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            pipeline = get_pipeline()
+            call_id = await pipeline.tick()
+            if call_id:
+                logger.info("Background digest triggered: call %s", call_id)
+        except Exception as exc:
+            logger.warning("Digest checker error: %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     register_phase1_tools()
     from packages.shared.permission_engine import PermissionEngine
-
     PermissionEngine.freeze()
+
+    # Start background digest checker
+    global _bg_task
+    _bg_task = asyncio.create_task(_digest_checker())
+    logger.info("Background digest checker started")
+
     yield
+
+    # Shutdown
+    if _bg_task:
+        _bg_task.cancel()
+        try:
+            await _bg_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="Vioris API Gateway", version="0.2.0", lifespan=lifespan)
@@ -205,28 +239,314 @@ async def revoke_device(device_id: str) -> dict:
 
 # ─── device-authenticated channel (WebSocket) ────────────────────────────────
 
+from services.api.app.websocket import WebSocketHub, WSMessage
+
+_hub: WebSocketHub | None = None
+_pipeline = None  # ProactiveCallPipeline, lazy init
+
+
+def get_hub() -> WebSocketHub:
+    global _hub
+    if _hub is None:
+        _hub = WebSocketHub()
+    return _hub
+
+
+def get_pipeline():
+    """Lazy-init the proactive call pipeline."""
+    global _pipeline
+    if _pipeline is None:
+        from packages.shared.proactive_pipeline import ProactiveCallPipeline
+
+        _pipeline = ProactiveCallPipeline(hub=get_hub())
+        _setup_hub_handlers(get_hub(), _pipeline)
+    return _pipeline
+
+
+def _setup_hub_handlers(hub: WebSocketHub, pipeline) -> None:
+    """Register message handlers on the hub for incoming phone commands."""
+
+    async def handle_voice(msg: WSMessage) -> None:
+        """Phone sent a voice utterance during an active call."""
+        call_id = msg.payload.get("call_id", "")
+        text = msg.payload.get("text", "")
+        if not call_id or not text:
+            return
+        result = await pipeline.handle_phone_message(call_id, text)
+        # Response is already pushed by handle_phone_message
+
+    async def handle_call_accept(msg: WSMessage) -> None:
+        """Phone accepted the ring."""
+        call_id = msg.payload.get("call_id", "")
+        if not call_id:
+            return
+        spoken = await pipeline.handle_call_accept(call_id)
+        if spoken:
+            await hub.send_to_phones(
+                {
+                    "type": "digest",
+                    "payload": {
+                        "call_id": call_id,
+                        "text": spoken,
+                        "items": [
+                            i.to_dict()
+                            for i in (pipeline.get_session(call_id).digest.items if pipeline.get_session(call_id) and pipeline.get_session(call_id).digest else [])
+                        ],
+                    },
+                }
+            )
+
+    async def handle_call_end(msg: WSMessage) -> None:
+        """Phone ended the call."""
+        call_id = msg.payload.get("call_id", "")
+        session = pipeline.get_session(call_id)
+        if session:
+            from packages.shared.proactive_pipeline import DigestStatus
+            session.status = DigestStatus.COMPLETED
+
+    async def handle_approve(msg: WSMessage) -> None:
+        """Phone approved an action."""
+        call_id = msg.payload.get("call_id", "")
+        action_id = msg.payload.get("action_id", "")
+        result = await pipeline.handle_phone_message(call_id, "approve")
+        # Action execution happens via pipeline.on_action callback
+
+    async def handle_reject(msg: WSMessage) -> None:
+        """Phone rejected an action."""
+        call_id = msg.payload.get("call_id", "")
+        await pipeline.handle_phone_message(call_id, "no don't")
+
+    hub.on("voice", handle_voice)
+    hub.on("call_accept", handle_call_accept)
+    hub.on("call_end", handle_call_end)
+    hub.on("approve", handle_approve)
+    hub.on("reject", handle_reject)
+
 
 @app.websocket("/ws/device")
 async def ws_device(websocket: WebSocket) -> None:
-    """Device channel: the phone must present its device JWT. Pairing/revokation
-    is the only gating before this socket is accepted."""
-    await websocket.accept()
+    """Device channel: the phone presents its device JWT in the query param.
+
+    Once authenticated, the connection is bidirectional:
+    - Phone can send commands (voice, approve, reject, status)
+    - Laptop can push events (ring, digest, approval_request)
+    """
     token = websocket.query_params.get("token")
-    try:
-        device = get_store().verify(token or "")
-    except InvalidDeviceTokenError as exc:
-        await websocket.close(code=4401, reason=str(exc))
-        return
-    except DeviceRevokedError:
-        await websocket.close(code=4403, reason="device revoked")
-        return
+    device_type = websocket.query_params.get("type", "phone")
+
+    # Verify JWT
+    device = None
+    if token:
+        try:
+            device = get_store().verify(token)
+        except (InvalidDeviceTokenError, DeviceRevokedError):
+            pass
+
+    client_id = device.device_id if device else f"anon-{id(websocket)}"
+    hub = get_hub()
 
     try:
+        client = await hub.connect(
+            websocket,
+            client_id=client_id,
+            device_type=device_type,
+            device_id=device.device_id if device else None,
+            authenticated=device is not None,
+        )
+
+        # Listen for messages from the phone
         while True:
-            await websocket.send_json({"device_id": device.device_id, "status": "connected"})
-            await asyncio.sleep(300)
-    except WebSocketDisconnect:  # pragma: no cover - client closed
-        return
+            try:
+                raw = await websocket.receive_text()
+                await hub.receive(client_id, raw)
+            except WebSocketDisconnect:
+                break
+    finally:
+        await hub.disconnect(client_id)
+
+
+# ─── push endpoints (laptop → phone) ─────────────────────────────────────────
+
+
+@app.post("/v1/push/ring")
+async def push_ring(
+    payload: dict,
+    device: Device = Depends(_require_device),
+) -> dict:
+    """Push a ring event to all authenticated phones."""
+    hub = get_hub()
+    sent = await hub.send_to_phones(
+        {
+            "type": "ring",
+            "payload": {
+                "source": payload.get("source", "proactive"),
+                "caller_name": payload.get("caller_name", "Vioris"),
+                "message": payload.get("message", ""),
+                "ring_id": payload.get("ring_id", ""),
+            },
+        }
+    )
+    return {"pushed_to": len(sent), "device": device.device_id}
+
+
+@app.post("/v1/push/digest")
+async def push_digest(
+    payload: dict,
+    device: Device = Depends(_require_device),
+) -> dict:
+    """Push a digest summary to all authenticated phones."""
+    hub = get_hub()
+    sent = await hub.send_to_phones(
+        {
+            "type": "digest",
+            "payload": {
+                "title": payload.get("title", "Daily Digest"),
+                "items": payload.get("items", []),
+                "spoken_text": payload.get("spoken_text", ""),
+            },
+        }
+    )
+    return {"pushed_to": len(sent), "device": device.device_id}
+
+
+@app.post("/v1/push/approval")
+async def push_approval(
+    payload: dict,
+    device: Device = Depends(_require_device),
+) -> dict:
+    """Push an approval request to all authenticated phones."""
+    hub = get_hub()
+    sent = await hub.send_to_phones(
+        {
+            "type": "approval_request",
+            "payload": {
+                "action_id": payload.get("action_id", ""),
+                "tool": payload.get("tool", ""),
+                "description": payload.get("description", ""),
+                "risk_level": payload.get("risk_level", ""),
+                "diff_summary": payload.get("diff_summary", ""),
+            },
+        }
+    )
+    return {"pushed_to": len(sent), "device": device.device_id}
+
+
+@app.post("/v1/push/text")
+async def push_text(
+    payload: dict,
+    device: Device = Depends(_require_device),
+) -> dict:
+    """Push a generic text message to all authenticated phones."""
+    hub = get_hub()
+    sent = await hub.send_to_phones(
+        {
+            "type": payload.get("message_type", "text"),
+            "payload": payload.get("payload", {}),
+        }
+    )
+    return {"pushed_to": len(sent), "device": device.device_id}
+
+
+@app.get("/v1/devices/connected")
+async def connected_devices(device: Device = Depends(_require_device)) -> dict:
+    """List currently connected WebSocket clients."""
+    hub = get_hub()
+    return {
+        "device": device.device_id,
+        "phones": len(hub.get_phone_clients()),
+        "laptops": len(hub.get_laptop_clients()),
+        "total": hub.connected_count,
+    }
+
+
+# ─── proactive call endpoints ────────────────────────────────────────────────
+
+
+@app.post("/v1/call/trigger")
+async def trigger_call(device: Device = Depends(_require_device)) -> dict:
+    """Manually trigger a proactive call to all connected phones."""
+    pipeline = get_pipeline()
+    call_id = await pipeline.tick()
+    if call_id:
+        return {
+            "device": device.device_id,
+            "call_id": call_id,
+            "status": "ringing",
+            "note": "Ring pushed to all authenticated phones",
+        }
+    return {
+        "device": device.device_id,
+        "call_id": None,
+        "status": "no_trigger",
+        "note": "Digest schedule did not trigger (wrong hour or too recent)",
+    }
+
+
+@app.post("/v1/call/{call_id}/speak")
+async def speak_digest(
+    call_id: str, device: Device = Depends(_require_device)
+) -> dict:
+    """Trigger the digest to be spoken (phone accepted the call)."""
+    pipeline = get_pipeline()
+    spoken = await pipeline.handle_call_accept(call_id)
+    if spoken:
+        return {
+            "device": device.device_id,
+            "call_id": call_id,
+            "spoken_text": spoken,
+            "status": "active",
+        }
+    return {"device": device.device_id, "call_id": call_id, "status": "not_found"}
+
+
+@app.post("/v1/call/{call_id}/message")
+async def call_message(
+    call_id: str, payload: dict, device: Device = Depends(_require_device)
+) -> dict:
+    """Send a voice utterance from the phone during an active call."""
+    pipeline = get_pipeline()
+    text = payload.get("text", "")
+    result = await pipeline.handle_phone_message(call_id, text)
+    return {"device": device.device_id, "call_id": call_id, **result}
+
+
+@app.get("/v1/call/{call_id}/status")
+async def call_status(
+    call_id: str, device: Device = Depends(_require_device)
+) -> dict:
+    """Get the status of a call session."""
+    pipeline = get_pipeline()
+    session = pipeline.get_session(call_id)
+    if not session:
+        return {"device": device.device_id, "call_id": call_id, "status": "not_found"}
+    return {
+        "device": device.device_id,
+        "call_id": call_id,
+        "status": session.status.value,
+        "turns": len(session.turns),
+        "items_count": len(session.digest.items) if session.digest else 0,
+        "pending_actions": len(session.pending_actions),
+    }
+
+
+@app.get("/v1/calls")
+async def list_calls(device: Device = Depends(_require_device)) -> dict:
+    """List all call sessions."""
+    pipeline = get_pipeline()
+    sessions = pipeline.get_all_sessions()
+    return {
+        "device": device.device_id,
+        "calls": [
+            {
+                "call_id": s.call_id,
+                "status": s.status.value,
+                "source": s.source.value,
+                "turns": len(s.turns),
+                "created_at": s.created_at,
+            }
+            for s in sessions
+        ],
+    }
 
 
 # ─── device-scoped proxy (mobile app talks only to this gateway) ─────────────
@@ -494,3 +814,9 @@ async def pair_page() -> FileResponse:
 async def dashboard_page() -> FileResponse:
     """Serve the main dashboard (requires auth via JWT in localStorage)."""
     return FileResponse(_STATIC_DIR / "dashboard.html")
+
+
+@app.get("/phone", response_class=HTMLResponse)
+async def phone_page() -> FileResponse:
+    """Serve the phone call UI. Pass ?token=JWT for WebSocket auth."""
+    return FileResponse(_STATIC_DIR / "phone.html")

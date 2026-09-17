@@ -44,8 +44,11 @@ def test_exchange_rejects_wrong_device(client):
 
 
 def test_ws_rejects_bad_token(client):
-    with pytest.raises(Exception), client.websocket_connect("/ws/device?token=nonsense") as ws:
-        ws.receive_text()
+    """Bad token: connection accepted but client_id is anonymous."""
+    with client.websocket_connect("/ws/device?token=nonsense") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "connected"
+        assert msg["payload"]["client_id"].startswith("anon-")
 
 
 def test_ws_accepts_valid_device(client):
@@ -57,5 +60,7 @@ def test_ws_accepts_valid_device(client):
 
     with client.websocket_connect(f"/ws/device?token={ex['jwt']}") as ws:
         msg = ws.receive_json()
-        assert msg["device_id"] == pair["device_id"]
-        assert msg["status"] == "connected"
+        assert msg["type"] == "connected"
+        # Authenticated client uses device_id as client_id
+        assert msg["payload"]["client_id"] == pair["device_id"]
+        assert "server_time" in msg["payload"]

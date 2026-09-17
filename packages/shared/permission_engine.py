@@ -11,9 +11,14 @@ See docs/03-permissions-and-security.md for the full permission matrix.
 from __future__ import annotations
 
 import logging
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
+
+import numpy as np
 
 from packages.shared.schemas import PermissionResult, RiskTier, ToolRegistration
+
+if TYPE_CHECKING:
+    from packages.shared.voiceprint import VoiceprintManager
 
 logger = logging.getLogger(__name__)
 
@@ -94,12 +99,28 @@ class PermissionEngine:
         cls._frozen = True
         logger.info("Permission registry frozen with %d tools registered.", len(cls._registry))
 
+    # Voiceprint manager injected at startup for second-factor verification
+    _voiceprint: ClassVar[VoiceprintManager | None] = None
+
     @classmethod
-    def classify(cls, tool_name: str) -> PermissionResult:
+    def set_voiceprint(cls, vp: VoiceprintManager | None) -> None:
+        """Inject the voiceprint manager for Critical-tier second-factor checks."""
+        cls._voiceprint = vp
+
+    @classmethod
+    def classify(
+        cls,
+        tool_name: str,
+        *,
+        second_factor_verified: bool = False,
+    ) -> PermissionResult:
         """Look up a tool's risk classification.
 
         Returns a PermissionResult with tier, confirmation requirements, etc.
         Raises UnknownToolError if the tool isn't registered — unregistered = blocked.
+
+        For Critical-tier tools, `requires_second_factor` is True. The caller
+        must then call `verify_critical_second_factor()` before execution.
         """
         if tool_name not in cls._registry:
             raise UnknownToolError(tool_name)
@@ -115,6 +136,34 @@ class PermissionEngine:
             allowed=True,
             reason=f"Tool '{tool_name}' classified as '{reg.tier.value}'",
         )
+
+    @classmethod
+    def verify_critical_second_factor(
+        cls,
+        audio: np.ndarray | None = None,
+        sample_rate: int = 16000,
+    ) -> tuple[bool, str]:
+        """Verify the second factor for a Critical-tier action.
+
+        Uses voiceprint verification if a voiceprint manager is enrolled.
+        Returns (passed: bool, reason: str).
+
+        If no voiceprint is enrolled, verification FAILS CLOSED — the action
+        is blocked. This enforces that Critical actions require enrollment first.
+        """
+        if cls._voiceprint is None:
+            return False, "no voiceprint manager configured"
+
+        if not cls._voiceprint.is_enrolled():
+            return False, "voiceprint not enrolled — cannot verify Critical action"
+
+        if audio is None or (hasattr(audio, "size") and audio.size == 0):
+            return False, "no audio provided for voiceprint verification"
+
+        passed, similarity = cls._voiceprint.verify(audio, sample_rate)
+        if passed:
+            return True, f"voiceprint verified (similarity={similarity:.4f})"
+        return False, f"voiceprint rejected (similarity={similarity:.4f})"
 
     @classmethod
     def is_registered(cls, tool_name: str) -> bool:

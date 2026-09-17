@@ -135,9 +135,10 @@ class TaskManager:
 
     def retry_step(self, task_id: str, step_id: str) -> Task:
         task = self.get(task_id)
-        self.engine.retry_step(task, step_id)
+        events = self.engine.retry_step(task, step_id)
+        for ev in events:
+            self.append_audit(ev["actor"], ev["action"], ev["detail"], task.task_id)
         self._persist(task)
-        self.append_audit("system", "planned_step", {"retry_of": step_id}, task.task_id)
         return task
 
     def run_next_step(self, task_id: str, execute: callable) -> tuple[Task, StepOutcome]:

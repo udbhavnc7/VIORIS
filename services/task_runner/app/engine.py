@@ -235,23 +235,53 @@ class TaskEngine:
         task.updated_at = _now()
         return events
 
-    def retry_step(self, task: Task, step_id: str) -> None:
+    def retry_step(self, task: Task, step_id: str) -> list[dict]:
         """Re-arm a failed step under the SAME idempotency_key, then resume.
 
         Attempt counts are tracked by step_id on the engine, so a retry is
         bounded by max_attempts and never re-keys the step (a conforming tool
         can deduplicate on idempotency_key alone).
+
+        For Execute/Critical steps, any previous approval is invalidated —
+        the step must go through the permission gate again. A fresh diff
+        is generated against current state rather than replaying a stale approval.
         """
+        events: list[dict] = []
         step = next((s for s in task.steps if s.step_id == step_id), None)
         if step is None:
             raise KeyError(f"no step {step_id}")
         if step.status != TaskStatus.FAILED:
             raise InvalidTransitionError(f"step {step_id} is {step.status.value}, not failed")
+
+        # For Execute/Critical steps: invalidate any stale approval.
+        # A retried step must re-validate permission and re-diff against
+        # current state — we never replay a stale approval.
+        if _requires_approval(step):
+            if self.approval_store is not None:
+                # Invalidate all previous approvals for this step
+                self.approval_store.invalidate_for_step(task.task_id, step.step_id)
+            # Generate a new idempotency_key so the old approval can't be reused
+            import uuid
+            step.idempotency_key = uuid.uuid4().hex
+            events.append(
+                _ev(
+                    "system",
+                    AuditAction.REQUESTED_APPROVAL,
+                    {
+                        "step": step.step_id,
+                        "tool": step.tool,
+                        "idempotency_key": step.idempotency_key,
+                        "reason": "retry — previous approval invalidated",
+                    },
+                )
+            )
+
         step.status = TaskStatus.CREATED
-        step.error = None  # idempotency_key is preserved
+        step.error = None  # idempotency_key is preserved for non-approval steps
         if task.status in (TaskStatus.FAILED, TaskStatus.PAUSED):
             task.status = TaskStatus.RUNNING
             task.updated_at = _now()
+        return events
 
     def arm_step(self, task: Task, step_id: str) -> None:
         """Re-arm an approval-pending step to CREATED so the approved run fires.

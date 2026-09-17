@@ -1,0 +1,456 @@
+"""
+Proactive Call Pipeline — the brain that decides to call the user.
+
+Flow:
+    1. Check DigestSchedule.should_trigger()
+    2. Fetch items from connectors (Gmail, WhatsApp, etc.)
+    3. Compose ProactiveDigest with DigestItems
+    4. Push RingEvent to phone via WebSocket hub
+    5. Handle call lifecycle: ring → accept → speak digest → listen → respond
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import Enum
+from typing import Any, Callable, Optional
+
+from .call_experience import (
+    CallExperience,
+    CallState,
+    DigestItem,
+    DigestSchedule,
+    ProactiveDigest,
+    RingEvent,
+    RingSource,
+)
+from .contacts import Contact, ContactBook
+from .email_connector import GmailConnector
+
+logger = logging.getLogger(__name__)
+
+
+class CallRole(Enum):
+    LAPTOP = "laptop"  # the server side
+    PHONE = "phone"  # the client side
+
+
+class DigestStatus(Enum):
+    PENDING = "pending"
+    SPOKEN = "spoken"
+    AWAITING_RESPONSE = "awaiting_response"
+    RESPONSE_RECEIVED = "response_received"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass
+class DigestTurn:
+    """One turn in the digest conversation."""
+
+    role: str  # "laptop" or "phone"
+    text: str
+    timestamp: float = field(default_factory=time.time)
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class CallSession:
+    """A single call session — tracks the full lifecycle."""
+
+    call_id: str
+    source: RingSource
+    status: DigestStatus = DigestStatus.PENDING
+    digest: Optional[ProactiveDigest] = None
+    turns: list[DigestTurn] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+    ended_at: Optional[float] = None
+    spoken_text: str = ""
+    pending_actions: list[dict] = field(default_factory=list)
+
+    def add_turn(self, role: str, text: str, **metadata: Any) -> DigestTurn:
+        turn = DigestTurn(role=role, text=text, metadata=metadata)
+        self.turns.append(turn)
+        return turn
+
+    def get_user_intent(self) -> str:
+        """Get the last phone turn as a raw utterance."""
+        for turn in reversed(self.turns):
+            if turn.role == "phone":
+                return turn.text
+        return ""
+
+
+class ProactiveCallPipeline:
+    """
+    Manages the full proactive call lifecycle.
+
+    Usage:
+        pipeline = ProactiveCallPipeline(hub, gmail, contacts)
+        # In a background loop:
+        await pipeline.tick()  # checks triggers, starts calls
+        # When phone sends a message:
+        await pipeline.handle_phone_message(call_id, utterance)
+    """
+
+    def __init__(
+        self,
+        hub: Any,  # WebSocketHub
+        gmail: Optional[GmailConnector] = None,
+        contacts: Optional[ContactBook] = None,
+        on_action: Optional[Callable] = None,
+    ):
+        self.hub = hub
+        self.gmail = gmail or GmailConnector()
+        self.contacts = contacts or ContactBook()
+        self.on_action = on_action  # callback for executing approved actions
+
+        self._sessions: dict[str, CallSession] = {}
+        self._schedule = DigestSchedule()
+        self._call_experience = CallExperience()
+
+    # ── tick: called periodically to check triggers ───────────────────────
+
+    async def tick(self) -> Optional[str]:
+        """Check if a digest should fire. Returns call_id if started."""
+        if not self._schedule.should_trigger():
+            return None
+
+        call_id = str(uuid.uuid4())[:8]
+        logger.info("Digest triggered, starting call %s", call_id)
+
+        session = await self._start_call(call_id)
+        return call_id
+
+    async def _start_call(self, call_id: str) -> CallSession:
+        """Fetch items, compose digest, push ring to phone."""
+        # 1. Fetch items from connectors
+        items = await self._fetch_digest_items()
+
+        # 2. Compose digest
+        digest = ProactiveDigest(call_id=call_id, items=items)
+
+        # 3. Create session
+        session = CallSession(
+            call_id=call_id,
+            source=RingSource.PROACTIVE,
+            digest=digest,
+            spoken_text=digest.compose_spoken(),
+        )
+        self._sessions[call_id] = session
+
+        # 4. Start call experience
+        ring = RingEvent(
+            call_id=call_id,
+            source=RingSource.PROACTIVE,
+            caller_name="Vioris",
+            reason=f"Daily digest — {len(items)} items",
+        )
+        self._call_experience.start_ring(ring)
+
+        # 5. Push ring to all authenticated phones
+        await self.hub.send_to_phones(
+            {
+                "type": "ring",
+                "payload": {
+                    "call_id": call_id,
+                    "source": "proactive",
+                    "caller_name": "Vioris",
+                    "reason": ring.reason,
+                    "digest_preview": digest.compose_spoken()[:200],
+                },
+            }
+        )
+
+        self._schedule.record_trigger()
+        logger.info("Ring pushed for call %s with %d items", call_id, len(items))
+        return session
+
+    async def _fetch_digest_items(self) -> list[DigestItem]:
+        """Gather items from all connected connectors."""
+        items: list[DigestItem] = []
+
+        # Gmail unread
+        if self.gmail.is_connected():
+            try:
+                unread = self.gmail.list_messages(query="is:unread", max_results=10)
+                for msg in unread:
+                    sender = msg.from_addr.split("<")[0].strip()
+                    items.append(
+                        DigestItem(
+                            item_type="email",
+                            summary=f"From {sender}: {msg.subject}",
+                            source="gmail",
+                            priority="high" if not msg.is_read else "normal",
+                            actionable=True,
+                        )
+                    )
+            except Exception as exc:
+                logger.warning("Failed to fetch Gmail: %s", exc)
+
+        # Placeholder: WhatsApp, calendar, etc. would go here
+
+        return items
+
+    # ── handle phone accepting the call ───────────────────────────────────
+
+    async def handle_call_accept(self, call_id: str) -> Optional[str]:
+        """Phone accepted the ring. Return the spoken digest text."""
+        session = self._sessions.get(call_id)
+        if not session:
+            return None
+
+        session.status = DigestStatus.SPOKEN
+        self._call_experience.accept_call()
+        self._call_experience.start_active()
+
+        session.add_turn("laptop", session.spoken_text, type="digest")
+
+        return session.spoken_text
+
+    # ── handle phone sending a voice message ──────────────────────────────
+
+    async def handle_phone_message(
+        self, call_id: str, utterance: str
+    ) -> dict[str, Any]:
+        """
+        Process a voice utterance from the phone.
+
+        Returns:
+            {
+                "response_text": "natural language response",
+                "action": None or {"type": "approve"/"reject"/"execute", ...},
+                "digest_status": "completed" | "awaiting_response" | ...
+            }
+        """
+        session = self._sessions.get(call_id)
+        if not session:
+            return {"response_text": "Call not found", "action": None}
+
+        session.add_turn("phone", utterance)
+
+        # Parse the utterance
+        result = self._process_utterance(session, utterance)
+
+        # Send response back to phone
+        if result["response_text"]:
+            session.add_turn("laptop", result["response_text"], type="response")
+            await self.hub.send_to_phones(
+                {
+                    "type": "voice_response",
+                    "payload": {
+                        "call_id": call_id,
+                        "text": result["response_text"],
+                        "action": result.get("action"),
+                    },
+                }
+            )
+
+        return result
+
+    def _process_utterance(
+        self, session: CallSession, utterance: str
+    ) -> dict[str, Any]:
+        """Route utterance to the right handler based on context."""
+        lower = utterance.lower().strip()
+
+        # ── End the call ──
+        if lower in ("bye", "goodbye", "end call", "hang up", "stop", "thanks bye"):
+            session.status = DigestStatus.COMPLETED
+            session.ended_at = time.time()
+            self._call_experience.end_call()
+            return {
+                "response_text": "Talk to you later.",
+                "action": None,
+                "digest_status": "completed",
+            }
+
+        # ── Skip / dismiss items ──
+        if lower in ("skip", "next", "dismiss", "ignore", "no"):
+            remaining = self._get_remaining_items(session)
+            if remaining:
+                return {
+                    "response_text": f"OK, skipping. {len(remaining)} items left.",
+                    "action": None,
+                    "digest_status": "awaiting_response",
+                }
+            return {
+                "response_text": "That's all for now. Talk to you later.",
+                "action": None,
+                "digest_status": "completed",
+            }
+
+        # ── Approve / confirm action ──
+        if lower in ("yes", "go on", "approve", "do it", "send it", "confirm"):
+            if session.pending_actions:
+                action = session.pending_actions.pop(0)
+                session.status = DigestStatus.RESPONSE_RECEIVED
+                return {
+                    "response_text": f"OK, {action.get('description', 'done')}.",
+                    "action": {"type": "execute", "action": action},
+                    "digest_status": "response_received",
+                }
+            return {
+                "response_text": "Nothing pending to approve.",
+                "action": None,
+                "digest_status": "awaiting_response",
+            }
+
+        # ── Reject / cancel ──
+        if lower in ("no don't", "cancel", "reject", "don't"):
+            if session.pending_actions:
+                session.pending_actions.pop(0)
+                return {
+                    "response_text": "OK, cancelled.",
+                    "action": None,
+                    "digest_status": "awaiting_response",
+                }
+            return {
+                "response_text": "Nothing to cancel.",
+                "action": None,
+                "digest_status": "awaiting_response",
+            }
+
+        # ── Read more details ──
+        if lower in ("tell me more", "more details", "read it", "open"):
+            for item in session.digest.items if session.digest else []:
+                if item.actionable:
+                    return {
+                        "response_text": f"{item.item_type}: {item.summary}",
+                        "action": None,
+                        "digest_status": "awaiting_response",
+                    }
+            return {
+                "response_text": "That's all the details I have.",
+                "action": None,
+                "digest_status": "awaiting_response",
+            }
+
+        # ── Contact-specific: "tell disha..." ──
+        if "tell" in lower or "reply" in lower or "message" in lower:
+            contact_name = self._extract_contact(lower)
+            if contact_name:
+                message = self._extract_message_after(lower)
+                if message:
+                    session.pending_actions.append(
+                        {
+                            "type": "message",
+                            "contact": contact_name,
+                            "message": message,
+                            "description": f"message to {contact_name}",
+                        }
+                    )
+                    return {
+                        "response_text": f"Got it. I'll tell {contact_name}: {message}. Should I send it?",
+                        "action": None,
+                        "digest_status": "awaiting_response",
+                    }
+                return {
+                    "response_text": f"What should I tell {contact_name}?",
+                    "action": None,
+                    "digest_status": "awaiting_response",
+                }
+
+        # ── React to email ──
+        if "react" in lower or any(emoji in lower for emoji in ("👍", "❤️", "😄")):
+            reaction = self._extract_reaction(lower)
+            return {
+                "response_text": f"Reacted with {reaction}." if reaction else "What reaction?",
+                "action": {"type": "react", "reaction": reaction} if reaction else None,
+                "digest_status": "awaiting_response",
+            }
+
+        # ── General query: fall through ──
+        remaining = self._get_remaining_items(session)
+        if remaining:
+            return {
+                "response_text": (
+                    f"You said: {utterance}. "
+                    f"There are still {len(remaining)} items. "
+                    "Want to hear the next one?"
+                ),
+                "action": None,
+                "digest_status": "awaiting_response",
+            }
+
+        return {
+            "response_text": f"You said: {utterance}. Anything else?",
+            "action": None,
+            "digest_status": "awaiting_response",
+        }
+
+    # ── helpers ───────────────────────────────────────────────────────────
+
+    def _get_remaining_items(self, session: CallSession) -> list[DigestItem]:
+        """Get items not yet addressed."""
+        if not session.digest:
+            return []
+        spoken_count = len(
+            [t for t in session.turns if t.role == "laptop" and t.metadata.get("type") == "digest"]
+        )
+        return session.digest.items[spoken_count:]
+
+    def _extract_contact(self, text: str) -> Optional[str]:
+        """Extract contact name from 'tell disha ...' pattern."""
+        for prefix in ("tell ", "message ", "reply to "):
+            if prefix in text:
+                after = text.split(prefix, 1)[1]
+                words = after.split()
+                if words:
+                    # Take first word(s) as contact name (up to 3 words)
+                    name_parts = []
+                    for w in words[:3]:
+                        if w in ("that", "to", "says", "said", "hey", "hi"):
+                            break
+                        name_parts.append(w.capitalize())
+                    return " ".join(name_parts) if name_parts else None
+        return None
+
+    def _extract_message_after(self, text: str) -> Optional[str]:
+        """Extract message content after contact name."""
+        for separator in (" that ", " to ", " says ", " said ", " hey ", " hi "):
+            if separator in text:
+                return text.split(separator, 1)[1].strip().strip('"').strip("'")
+        return None
+
+    def _extract_reaction(self, text: str) -> Optional[str]:
+        """Extract emoji reaction from text."""
+        emoji_map = {
+            "thumbs up": "👍",
+            "like": "👍",
+            "love": "❤️",
+            "heart": "❤️",
+            "laugh": "😄",
+            "wow": "😮",
+            "sad": "😢",
+            "pray": "🙏",
+        }
+        for keyword, emoji in emoji_map.items():
+            if keyword in text:
+                return emoji
+        # Check for direct emoji
+        for emoji in ("👍", "❤️", "😄", "😮", "😢", "🙏"):
+            if emoji in text:
+                return emoji
+        return None
+
+    # ── session access ────────────────────────────────────────────────────
+
+    def get_session(self, call_id: str) -> Optional[CallSession]:
+        return self._sessions.get(call_id)
+
+    def get_active_sessions(self) -> list[CallSession]:
+        return [
+            s
+            for s in self._sessions.values()
+            if s.status not in (DigestStatus.COMPLETED, DigestStatus.FAILED)
+        ]
+
+    def get_all_sessions(self) -> list[CallSession]:
+        return list(self._sessions.values())

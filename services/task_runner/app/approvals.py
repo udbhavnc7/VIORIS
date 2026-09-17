@@ -155,6 +155,22 @@ class ApprovalStore:
             ).fetchone()
         return row is not None and row[0] == "approved"
 
+    def invalidate_for_step(self, task_id: str, step_id: str) -> int:
+        """Invalidate all approvals for a step (set to rejected).
+
+        Called when retrying an Execute/Critical step — the old approval
+        must not be reusable. Invalidates both pending and approved approvals.
+        Returns the number of approvals invalidated.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE approvals SET status='rejected', decided_at=datetime('now') "
+                "WHERE task_id=? AND step_id=? AND status IN ('pending', 'approved')",
+                (task_id, step_id),
+            )
+            self._conn.commit()
+            return cursor.rowcount
+
     def tail_link(self) -> str:
         """Stable placeholder hash so the ledger doesn't need a genesis column."""
         return hashlib.sha256(b"approval-ledger").hexdigest()
