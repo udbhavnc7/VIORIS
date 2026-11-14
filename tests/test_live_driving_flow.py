@@ -1,10 +1,26 @@
-"""Live end-to-end test of the driving conversation flow over WebSocket."""
+"""Live end-to-end test of the driving conversation flow over WebSocket.
+
+This drives a real gateway on 127.0.0.1:8420, so it only runs when the caller
+supplies a paired device token:
+
+    VIORIS_LIVE_TOKEN=<device jwt> pytest tests/test_live_driving_flow.py
+
+Without the token the test skips rather than failing against whatever happens
+to be listening on the port.
+"""
 import asyncio
 import json
+import os
 import sys
 import websockets
 
-TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZXZfNWI1YjgwYjZhNCIsInR5cGUiOiJkZXZpY2UiLCJpYXQiOjE3ODk2NjA2NTQsImV4cCI6MTgyMTE5NjY1NH0.VI7k-LCcaLAbYClmlOD08_tkRoy7pEevRHbzfxdPVa0"
+import pytest
+
+TOKEN = os.environ.get("VIORIS_LIVE_TOKEN", "")
+pytestmark = pytest.mark.skipif(
+    not TOKEN,
+    reason="set VIORIS_LIVE_TOKEN (a paired device JWT) and run the gateway",
+)
 WS_URL = f"ws://127.0.0.1:8420/ws/device?type=phone&token={TOKEN}"
 
 

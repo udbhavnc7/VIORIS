@@ -366,9 +366,14 @@ class TestDrivingWorkflow:
             "don't reply to the mail, just react with a thumbs up, and also tell Disha I'll be reaching in another hour",
         )
         t2_resp = turn2["response_text"]
-        assert "Sure Udbhav" in t2_resp
-        assert "reacted to mail" in t2_resp
-        assert "sent the message" in t2_resp
+        # No transports are connected, so both actions are prepared, not sent.
+        assert "prepared both actions" in t2_resp
+        assert "nothing was delivered" in t2_resp
+        compound = turn2["action"]
+        assert compound["type"] == "compound_prepare"
+        statuses = {a["target"]: a["status"] for a in compound["actions"]}
+        assert statuses["RazorClub"] == "not_executed"
+        assert statuses["Disha"] == "not_sent"
 
         # 4. Turn 3: user concludes the call
         turn3 = await pipeline.handle_phone_message("drive_01", "no that's all, bye")
@@ -396,7 +401,8 @@ class TestDrivingWorkflow:
         # 2. User clarifies: shravan gk
         turn2 = await pipeline.handle_phone_message("drive_02", "shravan gk")
         t2_resp = turn2["response_text"]
-        assert "Sure" in t2_resp
+        assert "prepared a mail" in t2_resp
+        assert "has not been sent" in t2_resp
         assert "Shravan GK" in t2_resp
         assert "Hi Sceptix" in t2_resp
         assert turn2["action"] is not None
@@ -404,6 +410,7 @@ class TestDrivingWorkflow:
         assert turn2["action"]["recipient"] == "Shravan GK"
         assert turn2["action"]["email"] == "shravan.gk@sceptix.com"
         assert turn2["action"]["body"] == "Hi Sceptix"
+        assert turn2["action"]["status"] == "not_sent"
         assert "disambiguation" not in session.metadata
 
         # 3. User finishes

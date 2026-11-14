@@ -29,6 +29,11 @@ desktop.ini
 
 # Database
 pgdata/
+# Device pairing is generated at runtime and holds the local signing secret.
+vioris_data/pairing.json
+
+# Node
+node_modules/
 
 # Audio / Models
 *.wav

@@ -17,12 +17,26 @@ import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from packages.shared.permission_engine import PermissionEngine
 
 logger = logging.getLogger(__name__)
+
+def action_hash(tool: str, args: dict) -> str:
+    """Canonical fingerprint of the exact action a user approves.
+
+    IDs alone are not enough: if the step's recipient/content changes after
+    approval, the approval must no longer be valid. Hashing the tool plus the
+    full argument set binds consent to the action, not to a row number.
+    """
+    canonical = json.dumps(
+        {"tool": tool, "args": args}, sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 _APPROVAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS approvals (
@@ -33,6 +47,7 @@ CREATE TABLE IF NOT EXISTS approvals (
     tool             TEXT NOT NULL,
     diff_card        TEXT NOT NULL,
     status           TEXT NOT NULL,           -- pending | approved | rejected
+    action_hash      TEXT NOT NULL DEFAULT '',
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     decided_at       TEXT
 );
@@ -48,6 +63,9 @@ class ApprovalRequest:
     tool: str
     diff_card: dict[str, Any] = field(default_factory=dict)
     status: str = "pending"
+    action_hash: str = ""
+    created_at: str = ""
+    decided_at: str | None = None
 
 
 class ApprovalStore:
@@ -61,11 +79,19 @@ class ApprovalStore:
         # through _lock, so the connection may cross threads.
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.executescript(_APPROVAL_SCHEMA)
+        # migrate pre-existing ledgers that predate action binding
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(approvals)")}
+        if "action_hash" not in cols:
+            self._conn.execute(
+                "ALTER TABLE approvals ADD COLUMN action_hash TEXT NOT NULL DEFAULT ''"
+            )
         self._conn.commit()
 
     def create(self, task_id: str, step_id: str, idempotency_key: str, tool: str, args: dict) -> ApprovalRequest:
         approval_id = f"apr_{uuid.uuid4().hex[:10]}"
         diff = _diff_card(tool, args)
+        digest = action_hash(tool, args)
+        created_at = datetime.now(UTC).isoformat()
         req = ApprovalRequest(
             approval_id=approval_id,
             task_id=task_id,
@@ -73,12 +99,14 @@ class ApprovalStore:
             idempotency_key=idempotency_key,
             tool=tool,
             diff_card=diff,
+            action_hash=digest,
+            created_at=created_at,
         )
         with self._lock:
             self._conn.execute(
-                "INSERT INTO approvals (approval_id, task_id, step_id, idempotency_key, tool, diff_card, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
-                (approval_id, task_id, step_id, idempotency_key, tool, json.dumps(diff)),
+                "INSERT INTO approvals (approval_id, task_id, step_id, idempotency_key, tool, diff_card, status, action_hash, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                (approval_id, task_id, step_id, idempotency_key, tool, json.dumps(diff), digest, created_at),
             )
             self._conn.commit()
         return req
@@ -86,7 +114,7 @@ class ApprovalStore:
     def get(self, approval_id: str) -> ApprovalRequest | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT approval_id, task_id, step_id, idempotency_key, tool, diff_card, status "
+                "SELECT approval_id, task_id, step_id, idempotency_key, tool, diff_card, status, action_hash, created_at, decided_at "
                 "FROM approvals WHERE approval_id=?",
                 (approval_id,),
             ).fetchone()
@@ -122,13 +150,13 @@ class ApprovalStore:
         with self._lock:
             if task_id:
                 rows = self._conn.execute(
-                    "SELECT approval_id, task_id, step_id, idempotency_key, tool, diff_card, status "
+                    "SELECT approval_id, task_id, step_id, idempotency_key, tool, diff_card, status, action_hash, created_at, decided_at "
                     "FROM approvals WHERE task_id=? AND status='pending'",
                     (task_id,),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    "SELECT approval_id, task_id, step_id, idempotency_key, tool, diff_card, status "
+                    "SELECT approval_id, task_id, step_id, idempotency_key, tool, diff_card, status, action_hash, created_at, decided_at "
                     "FROM approvals WHERE status='pending'"
                 ).fetchall()
         return [self._row_to_request(r) for r in rows]
@@ -143,17 +171,33 @@ class ApprovalStore:
             tool=row[4],
             diff_card=json.loads(row[5]),
             status=row[6],
+            action_hash=row[7] if len(row) > 7 and row[7] else "",
+            created_at=(row[8] or "") if len(row) > 8 else "",
+            decided_at=(row[9] or None) if len(row) > 9 else None,
         )
 
-    def is_approved_for_step(self, task_id: str, step_id: str, idempotency_key: str) -> bool:
-        """True only if an explicit 'approved' record exists for THIS step and key."""
+    def is_approved_for_step(
+        self,
+        task_id: str,
+        step_id: str,
+        idempotency_key: str,
+        tool: str | None = None,
+        args: dict | None = None,
+    ) -> bool:
+        """True only if an explicit 'approved' record exists for THIS step,
+        key, and — when provided — the exact action contents."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT status FROM approvals "
+                "SELECT status, action_hash FROM approvals "
                 "WHERE task_id=? AND step_id=? AND idempotency_key=?",
                 (task_id, step_id, idempotency_key),
             ).fetchone()
-        return row is not None and row[0] == "approved"
+        if row is None or row[0] != "approved":
+            return False
+        if tool is not None and args is not None:
+            if row[1] != action_hash(tool, args):
+                return False
+        return True
 
     def invalidate_for_step(self, task_id: str, step_id: str) -> int:
         """Invalidate all approvals for a step (set to rejected).

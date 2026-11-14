@@ -43,7 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     from .planner import Planner
 
     backend = OllamaBackend(model=args.model, base_url=args.base_url)
-    plan = Planner(backend=backend).plan(args.request)
+    # Offline-first: known workflows plan deterministically before the model.
+    plan = Planner(backend=backend, deterministic=True).plan(args.request)
     print(json.dumps(plan.to_dict(), indent=2))
     return 0
 

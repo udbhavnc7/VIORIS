@@ -22,10 +22,14 @@ Routes:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 import httpx
 
@@ -33,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 COMPUTER_URL = os.getenv("VIORUS_COMPUTER_URL", "http://127.0.0.1:8430")
 SMART_HOME_URL = os.getenv("VIORUS_SMART_HOME_URL", "http://127.0.0.1:8455")
+_REMINDER_LOCK = threading.Lock()
 
 
 # ─── Generic Phase 6 connector routing ────────────────────────────────────────
@@ -156,6 +161,28 @@ def make_executor(
         tool = step.tool
         args = (step.result or {}).get("args") or {}
 
+        # ── local, side-effect-free tools ─────────────────────────────────
+        if tool == "system.get_time":
+            now = datetime.now().astimezone()
+            return {
+                "ok": True,
+                "tool": tool,
+                "result": {
+                    "iso": now.isoformat(timespec="seconds"),
+                    "local": now.strftime("%A, %d %B %Y · %H:%M %Z"),
+                },
+            }
+        if tool == "system.set_reminder":
+            return _set_reminder(args)
+        if tool == "system.stop":
+            # Executed by the manager so it halts every task, not just this one.
+            raise RuntimeError("system.stop must be dispatched by the task manager")
+        if tool == "system.register_payment":
+            raise RuntimeError(
+                "no payment transport is configured — refused; nothing was charged"
+            )
+
+        # ── computer agent ────────────────────────────────────────────────
         if tool in (
             "computer.start_remote_session",
             "computer.remote_input",
@@ -166,6 +193,20 @@ def make_executor(
             return _call_computer(tool, args, computer_url)
         if tool.startswith("smart_home."):
             return _call_smart_home(step, task, args, smart_home_url)
+
+        # ── messaging: map the Phase 2 tool onto the real connector ──────
+        if tool == "system.send_message":
+            route = _CONNECTOR_ROUTES["whatsapp.send_message"]
+            env, default = _CONNECTOR_SERVICES[route.service]
+            base = connector_urls.get(route.service) or os.getenv(env, default)
+            mapped = {
+                "recipient": args.get("recipient"),
+                "content": args.get("content"),
+                "channel": args.get("channel") or "whatsapp",
+            }
+            if args.get("session_ref"):
+                mapped["session_ref"] = args["session_ref"]
+            return _call_connector(step, task, mapped, route, base)
 
         route = _CONNECTOR_ROUTES.get(tool)
         if route is not None:
@@ -214,7 +255,7 @@ def _call_computer(tool: str, args: dict, base: str) -> dict:
         raise RuntimeError(f"unrouted tool {tool}")
 
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, trust_env=False) as client:
             if payload is not None:
                 resp = client.post(url, json=payload)
             else:
@@ -224,9 +265,7 @@ def _call_computer(tool: str, args: dict, base: str) -> dict:
 
     body = _parse(resp)
     latency_ms = int((time.time() - started) * 1000)
-    if resp.status_code >= 400:
-        detail = body.get("detail") if isinstance(body, dict) else str(body)
-        raise RuntimeError(f"{tool} rejected: {detail}")
+    _raise_for_failure(tool, resp.status_code, body)
     return {"ok": True, "tool": tool, "latency_ms": latency_ms, "result": body}
 
 
@@ -247,14 +286,12 @@ def _call_smart_home(step, task, args: dict, base: str) -> dict:
             if args.get(key):
                 params[key] = args[key]
         try:
-            with httpx.Client(timeout=30) as client:
+            with httpx.Client(timeout=30, trust_env=False) as client:
                 resp = client.get(f"{base}/status", params=params)
         except httpx.RequestError as exc:
             raise RuntimeError(f"smart-home connector unreachable for {tool}: {exc}") from exc
         body = _parse(resp)
-        if resp.status_code >= 400:
-            detail = body.get("detail") if isinstance(body, dict) else str(body)
-            raise RuntimeError(f"{tool} rejected: {detail}")
+        _raise_for_failure(tool, resp.status_code, body)
         return {"ok": True, "tool": tool, "result": body}
 
     if tool == "smart_home.control":
@@ -269,14 +306,12 @@ def _call_smart_home(step, task, args: dict, base: str) -> dict:
         if args.get("hub_ref"):
             payload["hub_ref"] = args["hub_ref"]
         try:
-            with httpx.Client(timeout=30) as client:
+            with httpx.Client(timeout=30, trust_env=False) as client:
                 resp = client.post(f"{base}/control", json=payload)
         except httpx.RequestError as exc:
             raise RuntimeError(f"smart-home connector unreachable for {tool}: {exc}") from exc
         body = _parse(resp)
-        if resp.status_code >= 400:
-            detail = body.get("detail") if isinstance(body, dict) else str(body)
-            raise RuntimeError(f"{tool} rejected: {detail}")
+        _raise_for_failure(tool, resp.status_code, body)
         return {"ok": True, "tool": tool, "result": body}
 
     raise RuntimeError(f"no executor for tool {tool!r} — refused, not guessed")
@@ -295,7 +330,7 @@ def _call_connector(step, task, args: dict, route: _Route, base: str) -> dict:
     task_id = getattr(task, "task_id", None)
 
     try:
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=30, trust_env=False) as client:
             if route.method == "GET":
                 params = {k: args[k] for k in route.query_keys if args.get(k) is not None}
                 resp = client.get(f"{base}{route.path}", params=params)
@@ -310,10 +345,56 @@ def _call_connector(step, task, args: dict, route: _Route, base: str) -> dict:
         raise RuntimeError(f"{route.service} connector unreachable for {tool}: {exc}") from exc
 
     body = _parse(resp)
-    if resp.status_code >= 400:
+    _raise_for_failure(tool, resp.status_code, body)
+    return {"ok": True, "tool": tool, "result": body}
+
+
+def _raise_for_failure(tool: str, status_code: int, body) -> None:
+    """A 200 response is not success. Connectors may report ok:false (demo
+    transport, revoked session, provider error) inside a 2xx body — treating
+    that as success would fabricate a delivered action."""
+    if status_code >= 400:
         detail = body.get("detail") if isinstance(body, dict) else str(body)
         raise RuntimeError(f"{tool} rejected: {detail}")
-    return {"ok": True, "tool": tool, "result": body}
+    if isinstance(body, dict) and body.get("ok") is False:
+        reason = body.get("error") or body.get("detail") or "connector reported failure"
+        raise RuntimeError(f"{tool} failed: {reason}")
+
+
+def _set_reminder(args: dict) -> dict:
+    """Persist a local reminder. No delivery channel is claimed.
+
+    Stored under vioris_data/reminders.json; the result says exactly that so
+    the UI never implies a notification was scheduled.
+    """
+    data_dir = Path(os.getenv("VIORIS_DATA_DIR", "vioris_data"))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / "reminders.json"
+    reminder = {
+        "text": args.get("reminder") or args.get("text") or "",
+        "at": args.get("at"),
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    if not reminder["text"]:
+        raise RuntimeError("reminder text is required")
+    with _REMINDER_LOCK:
+        try:
+            existing = json.loads(path.read_text("utf-8"))
+            if not isinstance(existing, list):
+                existing = []
+        except (FileNotFoundError, json.JSONDecodeError):
+            existing = []
+        existing.append(reminder)
+        path.write_text(json.dumps(existing, indent=2), "utf-8")
+    return {
+        "ok": True,
+        "tool": "system.set_reminder",
+        "result": {
+            "stored": True,
+            "reminder": reminder,
+            "delivery": "local file only — no notification transport is configured",
+        },
+    }
 
 
 def _parse(resp: httpx.Response) -> dict:

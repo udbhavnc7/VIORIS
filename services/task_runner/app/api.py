@@ -11,15 +11,36 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import time
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from packages.shared.permission_engine import (
+    PermissionEngine,
+    UnknownToolError,
+    register_all_tools,
+)
 from packages.shared.schemas import RiskTier, TaskStep
+from packages.shared.second_factor import load_or_create_key
+from packages.shared.second_factor import verify as verify_second_factor
 
 from .manager import TaskManager
 
-app = FastAPI(title="Vioris Task Runner")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # The task-runner executes and gates steps; it needs the COMPLETE static
+    # registry. Without this every Execute step is treated as unknown/blocked.
+    if not PermissionEngine._frozen:
+        register_all_tools()
+        PermissionEngine.freeze()
+    yield
+
+
+app = FastAPI(title="Vioris Task Runner", lifespan=lifespan)
 
 _manager: TaskManager | None = None
 
@@ -48,18 +69,73 @@ class StepPayload(BaseModel):
 
 @app.post("/tasks")
 def create_task(req: CreateTaskRequest) -> dict:
+    """Create a task from an explicit plan or by asking the planner.
+
+    Risk is ALWAYS taken from the frozen registry. A caller that sends
+    `risk_level: "observe"` for an Execute tool does not get a downgrade —
+    the registry wins, and an unknown tool is refused outright.
+    """
+    blocked_tools: list[dict] = []
     if req.steps:
-        steps = [TaskStep(**s) for s in req.steps]
+        steps = []
+        for raw in req.steps:
+            tool = raw.get("tool")
+            try:
+                tier = PermissionEngine.classify(tool).tier
+            except UnknownToolError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            steps.append(
+                TaskStep(
+                    agent=raw.get("agent", "system"),
+                    tool=tool,
+                    risk_level=tier,
+                    result=raw.get("result") or {"args": raw.get("args") or {}},
+                )
+            )
     elif req.tool:
+        try:
+            tier = PermissionEngine.classify(req.tool).tier
+        except UnknownToolError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         steps = [
-            TaskStep(agent="computer", tool=req.tool, risk_level=RiskTier.OBSERVE)
-        ] * req.step_count
+            TaskStep(
+                agent="system",
+                tool=req.tool,
+                risk_level=tier,
+                result={"args": {}},
+            )
+            for _ in range(max(1, req.step_count))
+        ]
     else:
-        steps = [
-            TaskStep(agent="computer", tool="system.open_app", risk_level=RiskTier.OBSERVE)
-        ] * req.step_count
+        # Natural language: plan deterministically where possible, else use
+        # the local LLM planner. Nothing executes during planning.
+        from services.orchestrator.app.llm_client import PlannerBackendError
+        from services.orchestrator.app.planner import Planner
+
+        plan = Planner().plan(req.request)
+        if plan.error:
+            detail = (
+                "No deterministic workflow matched and the local planner is "
+                f"unavailable ({plan.error}). Install Ollama or use a suggested "
+                "workflow."
+            )
+            raise HTTPException(status_code=422, detail=detail)
+        steps = plan.steps
+        blocked_tools = plan.blocked_tools
+        if not steps:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "I couldn't turn that into a plan with the tools I have. "
+                    "Try a specific request such as 'brief me', 'check unread mail', "
+                    "or 'send a message to Disha saying I am running late'."
+                ),
+            )
+
     task = get_manager().create_task(req.request, steps)
-    return _task_dict(task)
+    payload = _task_dict(task)
+    payload["blocked_tools"] = blocked_tools
+    return payload
 
 
 @app.get("/tasks")
@@ -150,13 +226,45 @@ def stop_everything() -> dict:
     return {"stopped": affected, "count": len(affected)}
 
 
+CRITICAL_COOLDOWN_SECONDS = 5
+
+
 @app.post("/approvals/{approval_id}/approve")
-def approve_approval(approval_id: str, task_id: str | None = None) -> dict:
+def approve_approval(
+    approval_id: str,
+    task_id: str | None = None,
+    x_vioris_second_factor: str | None = Header(default=None, alias="X-Vioris-Second-Factor"),
+) -> dict:
     mgr = get_manager()
     approval = mgr.approvals.get(approval_id)
     if approval is None:
         raise HTTPException(status_code=404, detail="approval not found")
-    task = mgr.approve(approval.task_id, approval_id)
+
+    # Critical actions need a second factor AND a cooldown. Both are checked
+    # here, at the API boundary, so a direct task-runner call cannot bypass
+    # the gateway's PIN prompt.
+    try:
+        tier = PermissionEngine.classify(approval.tool).tier
+    except UnknownToolError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if tier == RiskTier.CRITICAL:
+        created = _parse_timestamp(approval.created_at)
+        elapsed = _now_ts() - created
+        if elapsed < CRITICAL_COOLDOWN_SECONDS:
+            retry_after = max(1, round(CRITICAL_COOLDOWN_SECONDS - elapsed))
+            raise HTTPException(
+                status_code=409,
+                detail=f"Critical cooldown: wait {retry_after}s before approving.",
+            )
+        key = load_or_create_key()
+        ok, note = verify_second_factor(x_vioris_second_factor, approval_id, key)
+        if not ok:
+            raise HTTPException(status_code=403, detail=note)
+
+    try:
+        task = mgr.approve(approval.task_id, approval_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     # Auto-run the armed step: "approve from your phone while the laptop is
     # out of sight" must actually FIRE the step. The step was re-armed from
     # WAITING_APPROVAL to CREATED by approve(); run_next_step executes it with
@@ -207,6 +315,23 @@ def audit_events(limit: int = 100) -> dict:
     return {"events": mgr.audit_events_copy(limit), "chain_ok": mgr.verify_chain()[0]}
 
 
+def _now_ts() -> float:
+    return time.time()
+
+
+def _parse_timestamp(value: str | None) -> float:
+    """Approval rows store UTC timestamps from SQLite's datetime('now')."""
+    if not value:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
 def _task_dict(task) -> dict:
     return {
         "task_id": task.task_id,
@@ -221,6 +346,10 @@ def _task_dict(task) -> dict:
                 "risk_level": s.risk_level.value,
                 "status": s.status.value,
                 "error": s.error,
+                # Before execution this holds {"args": …}; afterwards it holds
+                # the verified tool result. The UI only reads it for detail.
+                "result": s.result,
+                "created_at": s.created_at.isoformat(),
             }
             for s in task.steps
         ],

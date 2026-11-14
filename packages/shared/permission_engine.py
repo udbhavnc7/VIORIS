@@ -588,3 +588,20 @@ def register_phase6_connector_tools() -> None:
     for tool in _PHASE6_CONNECTOR_TOOLS:
         if not PermissionEngine.is_registered(tool.tool_name):
             PermissionEngine.register(tool)
+
+
+def register_all_tools() -> None:
+    """Register every statically known tool, then freeze at the call site.
+
+    Every long-lived service must call this during startup. A partial registry
+    silently changes behaviour: planning refuses tools it should know, and
+    execution treats them as unknown (which means blocked). There is exactly
+    one entry point so a service can never forget a phase.
+    """
+    register_phase1_tools()
+    register_phase2_tools()
+    register_phase3_tools()
+    register_phase3_browser_tools()
+    register_phase3_files_tools()
+    register_phase5_remote_tools()
+    register_phase6_connector_tools()

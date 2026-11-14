@@ -1,11 +1,16 @@
 """
 Vioris Gateway — startup script.
 
-Binds to 0.0.0.0:8420 (accessible over Tailscale).
+Binds to 127.0.0.1 by default. Loopback-only is the safe default; to reach it
+from a phone, opt in explicitly with `--host 0.0.0.0` only on a Tailscale
+interface and never expose it to the public internet.
+
+The pairing signing secret is generated once and persisted in
+`vioris_data/pairing.json`; set VIORIS_PAIRING_SECRET to supply your own.
 
 Usage:
     python run_gateway.py
-    python run_gateway.py --port 8420 --host 0.0.0.0
+    python run_gateway.py --port 8420 --host 0.0.0.0   # Tailscale only
 """
 
 import argparse
@@ -14,15 +19,14 @@ import sys
 
 # Ensure the project root is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.environ.setdefault("VIORIS_PAIRING_SECRET", "vioris_stable_dev_secret_key_2026_x89a")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Vioris API Gateway")
     parser.add_argument(
         "--host",
-        default=os.getenv("VIORIS_API_HOST", "0.0.0.0"),
-        help="Bind host (default: 0.0.0.0 — accessible over Tailscale)",
+        default=os.getenv("VIORIS_API_HOST", "127.0.0.1"),
+        help="Bind host (default: 127.0.0.1; pass 0.0.0.0 only on a private Tailscale network)",
     )
     parser.add_argument(
         "--port",

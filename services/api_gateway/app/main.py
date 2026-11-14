@@ -19,8 +19,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger("vioris.gateway")
@@ -31,7 +33,8 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from packages.shared.permission_engine import register_phase1_tools
+from packages.shared.permission_engine import PermissionEngine, register_all_tools
+from packages.shared.second_factor import load_or_create_key, mint, pin_matches
 
 from .pairing import (
     Device,
@@ -42,8 +45,15 @@ from .pairing import (
     PairingStore,
 )
 
-TASK_RUNNER_URL = os.getenv("VIORUS_TASK_RUNNER_URL", "http://127.0.0.1:8421")
-COMPUTER_URL = os.getenv("VIORUS_COMPUTER_URL", "http://127.0.0.1:8430")
+TASK_RUNNER_URL = os.getenv("VIORUS_TASK_RUNNER_URL") or os.getenv(
+    "VIORIS_TASK_RUNNER_URL", "http://127.0.0.1:8421"
+)
+COMPUTER_URL = os.getenv("VIORUS_COMPUTER_URL") or os.getenv(
+    "VIORIS_COMPUTER_URL", "http://127.0.0.1:8430"
+)
+MEMORY_URL = os.getenv("VIORIS_MEMORY_URL") or os.getenv(
+    "VIORUS_MEMORY_URL", "http://127.0.0.1:8441"
+)
 GATEWAY_HOST = os.getenv("VIORIS_API_HOST", "0.0.0.0")
 GATEWAY_PORT = int(os.getenv("VIORIS_API_PORT", "8420"))
 
@@ -56,7 +66,10 @@ _STATIC_DIR = Path(__file__).with_name("static")
 def get_store() -> PairingStore:
     global _store
     if _store is None:
-        _store = PairingStore()
+        # Persist devices + revocations + the signing secret across restarts.
+        # The secret is generated once and stored beside the local database.
+        store_path = os.getenv("VIORIS_PAIRING_STORE", "vioris_data/pairing.json")
+        _store = PairingStore(store_path=store_path)
     return _store
 
 
@@ -100,6 +113,33 @@ class DeviceResponse(BaseModel):
     revoked: bool
 
 
+class CreateTaskPayload(BaseModel):
+    """A natural-language request (or an explicit plan) from the desktop UI.
+
+    When `steps` is omitted the task-runner asks the planner for a plan. Every
+    step's risk tier is re-derived from the frozen registry — a caller can
+    never downgrade an Execute step by labelling it "observe".
+    """
+
+    request: str = Field(min_length=1, max_length=2000)
+    steps: list[dict] | None = None
+    start: bool = True
+    auto_run: bool = True
+
+
+class MemoryCreatePayload(BaseModel):
+    category: str
+    content: str = Field(min_length=1)
+    source: str = "user"
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    user_opted_in: bool = False
+
+
+class MemoryCorrectPayload(BaseModel):
+    content: str = Field(min_length=1)
+    category: str | None = None
+
+
 def _device_dict(device) -> DeviceResponse:
     return DeviceResponse(
         device_id=device.device_id,
@@ -129,9 +169,11 @@ async def _digest_checker() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    register_phase1_tools()
-    from packages.shared.permission_engine import PermissionEngine
-    PermissionEngine.freeze()
+    # Register the COMPLETE static registry, then freeze it. A partial registry
+    # makes planning refuse known tools and execution block them as unknown.
+    if not PermissionEngine._frozen:
+        register_all_tools()
+        PermissionEngine.freeze()
 
     # Start background digest checker
     global _bg_task
@@ -147,6 +189,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             await _bg_task
         except asyncio.CancelledError:
             pass
+    if _pooled_client is not None and not _pooled_client.is_closed:
+        await _pooled_client.aclose()
 
 
 app = FastAPI(title="Vioris API Gateway", version="0.2.0", lifespan=lifespan)
@@ -169,18 +213,60 @@ def _require_device(authorization: str | None = Header(default=None)) -> Device:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
-async def _proxy(method: str, path: str, device: Device, body: dict | None = None) -> dict:
+_pooled_client: httpx.AsyncClient | None = None
+
+
+def _client() -> httpx.AsyncClient:
+    """One pooled client for every local call the gateway makes.
+
+    Constructing an AsyncClient builds an SSL context; on Windows that is a
+    ~300 ms blocking operation. Creating one per request serialised the event
+    loop and made ordinary polls take seconds, so all calls share this pool.
+    """
+    global _pooled_client
+    if _pooled_client is None or _pooled_client.is_closed:
+        # Keep-alive expiry is deliberately shorter than uvicorn's default
+        # five-second idle close. Without this, a pooled socket can be reused
+        # just as the server drops it and the read fails once.
+        _pooled_client = httpx.AsyncClient(
+            trust_env=False,
+            limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=2.0),
+        )
+    return _pooled_client
+
+
+async def _proxy(
+    method: str,
+    path: str,
+    device: Device,
+    body: dict | None = None,
+    headers: dict | None = None,
+) -> dict:
     """Forward an authenticated device action to the local task-runner.
 
     The device JWT is verified here; the task-runner stays localhost-only and
     performs its own approval/audit recording for approve/reject/stop.
     """
     url = f"{TASK_RUNNER_URL}{path}"
+
+    async def send() -> httpx.Response:
+        return await _client().request(method, url, json=body, headers=headers, timeout=10.0)
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.request(method, url, json=body)
+        resp = await send()
     except httpx.RequestError as exc:
-        raise HTTPException(status_code=503, detail=f"task-runner unreachable: {exc}") from exc
+        # Read-only calls are safe to retry once if a keep-alive socket was
+        # closed under us. Writes are never replayed.
+        if method.upper() != "GET":
+            logger.warning("proxy %s %s failed: %s", method, path, exc)
+            raise HTTPException(status_code=503, detail=f"task-runner unreachable: {exc}") from exc
+        try:
+            resp = await send()
+        except httpx.RequestError as retry_exc:
+            logger.warning("proxy %s %s failed twice: %s", method, path, retry_exc)
+            raise HTTPException(
+                status_code=503, detail=f"task-runner unreachable: {retry_exc}"
+            ) from retry_exc
     try:
         payload = resp.json()
     except Exception:  # noqa: BLE001
@@ -225,12 +311,12 @@ async def exchange(req: ExchangeRequest) -> dict:
 
 
 @app.get("/devices")
-async def list_devices() -> list[dict]:
+async def list_devices(device: Device = Depends(_require_device)) -> list[dict]:
     return [_device_dict(d).model_dump() for d in get_store().list_devices()]
 
 
 @app.post("/devices/{device_id}/revoke")
-async def revoke_device(device_id: str) -> dict:
+async def revoke_device(device_id: str, device: Device = Depends(_require_device)) -> dict:
     ok = get_store().revoke(device_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"unknown device '{device_id}'")
@@ -338,16 +424,22 @@ async def ws_device(websocket: WebSocket) -> None:
     """
     token = websocket.query_params.get("token")
     device_type = websocket.query_params.get("type", "phone")
+    if device_type not in ("phone", "laptop"):
+        device_type = "phone"
 
-    # Verify JWT
-    device = None
-    if token:
-        try:
-            device = get_store().verify(token)
-        except (InvalidDeviceTokenError, DeviceRevokedError):
-            pass
+    # Authentication is mandatory. An unauthenticated socket is never accepted:
+    # accepting it would let any local process receive pushed digests/approvals
+    # or drive handlers. Fail closed.
+    if not token:
+        await websocket.close(code=1008)
+        return
+    try:
+        device = get_store().verify(token)
+    except (InvalidDeviceTokenError, DeviceRevokedError):
+        await websocket.close(code=1008)
+        return
 
-    client_id = f"{device.device_id}-{id(websocket)}" if device else f"anon-{id(websocket)}"
+    client_id = device.device_id
     hub = get_hub()
 
     try:
@@ -561,7 +653,9 @@ async def list_calls(device: Device = Depends(_require_device)) -> dict:
                 "status": s.status.value,
                 "source": s.source.value,
                 "turns": len(s.turns),
-                "created_at": s.created_at,
+                # Sessions carry an epoch float internally; the UI consumes ISO
+                # timestamps everywhere else, so normalise at the boundary.
+                "created_at": datetime.fromtimestamp(s.created_at, UTC).isoformat(),
             }
             for s in sessions
         ],
@@ -576,16 +670,162 @@ async def v1_tasks(device: Device = Depends(_require_device)) -> dict:
     return {"device": device.device_id, "tasks": await _proxy("GET", "/tasks", device)}
 
 
+@app.post("/v1/tasks")
+async def v1_create_task(
+    req: CreateTaskPayload, device: Device = Depends(_require_device)
+) -> dict:
+    """Plan (or accept) a request, then advance it up to the next gate.
+
+    The task-runner owns planning and execution. The gateway only: creates,
+    optionally starts, and runs steps until the task pauses for approval,
+    finishes, or fails. It never skips the approval gate.
+    """
+    created = await _proxy(
+        "POST",
+        "/tasks",
+        device,
+        {"request": req.request, "steps": req.steps},
+    )
+    task_id = created.get("task_id")
+    if not task_id:
+        raise HTTPException(status_code=502, detail="task-runner returned no task id")
+
+    result: dict = {"task": created, "task_id": task_id}
+    if req.start:
+        await _proxy("POST", f"/tasks/{task_id}/start", device)
+    if req.auto_run:
+        result = await _advance_task(device, task_id)
+        result["task_id"] = task_id
+    result["blocked_tools"] = created.get("blocked_tools", [])
+    return {"device": device.device_id, **result}
+
+
+@app.get("/v1/tasks/{task_id}")
+async def v1_task(task_id: str, device: Device = Depends(_require_device)) -> dict:
+    return {"device": device.device_id, "task": await _proxy("GET", f"/tasks/{task_id}", device)}
+
+
+@app.post("/v1/tasks/{task_id}/run")
+async def v1_run_task(task_id: str, device: Device = Depends(_require_device)) -> dict:
+    return {"device": device.device_id, **(await _advance_task(device, task_id))}
+
+
+@app.post("/v1/tasks/{task_id}/pause")
+async def v1_pause_task(task_id: str, device: Device = Depends(_require_device)) -> dict:
+    return {
+        "device": device.device_id,
+        "task": await _proxy("POST", f"/tasks/{task_id}/pause", device),
+    }
+
+
+@app.post("/v1/tasks/{task_id}/resume")
+async def v1_resume_task(task_id: str, device: Device = Depends(_require_device)) -> dict:
+    return {
+        "device": device.device_id,
+        "task": await _proxy("POST", f"/tasks/{task_id}/resume", device),
+    }
+
+
+@app.post("/v1/tasks/{task_id}/cancel")
+async def v1_cancel_task(task_id: str, device: Device = Depends(_require_device)) -> dict:
+    return {
+        "device": device.device_id,
+        "task": await _proxy("POST", f"/tasks/{task_id}/cancel", device),
+    }
+
+
+@app.post("/v1/tasks/{task_id}/retry/{step_id}")
+async def v1_retry_step(
+    task_id: str, step_id: str, device: Device = Depends(_require_device)
+) -> dict:
+    task = await _proxy("POST", f"/tasks/{task_id}/retry/{step_id}", device)
+    return {"device": device.device_id, "task": task}
+
+
 @app.get("/v1/approvals")
 async def v1_approvals(device: Device = Depends(_require_device)) -> dict:
-    return {"device": device.device_id, "approvals": await _proxy("GET", "/approvals", device)}
+    approvals = await _proxy("GET", "/approvals", device)
+    # The idempotency key and action hash are server-side consent bindings.
+    # The UI renders the diff card; it never needs the capability values. The
+    # risk tier is re-derived from the frozen registry (never the caller) and
+    # attached so the approval card can warn and gate correctly.
+    safe = []
+    for approval in approvals:
+        item = {k: v for k, v in approval.items() if k not in ("idempotency_key", "action_hash")}
+        try:
+            item["risk_level"] = PermissionEngine.classify(approval.get("tool")).tier.value
+        except Exception:  # noqa: BLE001 — unknown tools are shown as critical
+            item["risk_level"] = "critical"
+        safe.append(item)
+    return {"device": device.device_id, "approvals": safe}
+
+
+CRITICAL_COOLDOWN_SECONDS = 5
+
+
+def _parse_ts(value: str | None) -> float:
+    if not value:
+        return 0.0
+    try:
+        from datetime import UTC, datetime
+
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.timestamp()
+    except ValueError:
+        return 0.0
 
 
 @app.post("/v1/approvals/{approval_id}/approve")
-async def v1_approve(approval_id: str, device: Device = Depends(_require_device)) -> dict:
+async def v1_approve(
+    approval_id: str,
+    payload: dict | None = None,
+    device: Device = Depends(_require_device),
+) -> dict:
+    """Approve exactly one action. Critical actions additionally require the
+    locally configured PIN and the cooldown; the proof is bound to this
+    approval id and verified again by the task-runner."""
+    approvals = await _proxy("GET", "/approvals", device)
+    target = next((a for a in approvals if a.get("approval_id") == approval_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="approval not found")
+
+    try:
+        from packages.shared.schemas import RiskTier
+
+        tier = PermissionEngine.classify(target.get("tool")).tier
+    except Exception as exc:  # noqa: BLE001 — unknown tool is never approvable
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    headers: dict | None = None
+    if tier == RiskTier.CRITICAL:
+        elapsed = time.time() - _parse_ts(target.get("created_at"))
+        if elapsed < CRITICAL_COOLDOWN_SECONDS:
+            retry_after = max(1, round(CRITICAL_COOLDOWN_SECONDS - elapsed))
+            raise HTTPException(
+                status_code=409,
+                detail=f"Critical cooldown: wait {retry_after}s before approving.",
+            )
+        pin = (payload or {}).get("pin")
+        ok, note = pin_matches(pin)
+        if not ok:
+            raise HTTPException(status_code=403, detail=note)
+        headers = {"X-Vioris-Second-Factor": mint(approval_id, load_or_create_key())}
+
+    approved = await _proxy(
+        "POST", f"/approvals/{approval_id}/approve", device, headers=headers
+    )
+    task_id = approved.get("task_id")
+    if not task_id:
+        return {"device": device.device_id, "approval": approved, "result": approved}
+    # Approval fires the armed step; keep running until the next gate/finish.
+    advanced = await _advance_task(device, task_id)
     return {
         "device": device.device_id,
-        "result": await _proxy("POST", f"/approvals/{approval_id}/approve", device),
+        "approval": approved,
+        "result": approved,
+        **advanced,
     }
 
 
@@ -595,6 +835,24 @@ async def v1_reject(approval_id: str, device: Device = Depends(_require_device))
         "device": device.device_id,
         "result": await _proxy("POST", f"/approvals/{approval_id}/reject", device),
     }
+
+
+async def _advance_task(device: Device, task_id: str, max_steps: int = 16) -> dict:
+    """Run steps until the task gates, finishes, or stops being runnable.
+
+    Bounded by max_steps so a malformed plan can never loop forever. The
+    loop never bypasses approval: a waiting_approval status ends it.
+    """
+    last: dict = {"task": None}
+    for _ in range(max_steps):
+        last = await _proxy("POST", f"/tasks/{task_id}/run", device)
+        status = (last.get("task") or {}).get("status")
+        if status not in ("running", "created"):
+            break
+        steps = (last.get("task") or {}).get("steps") or []
+        if not any(s.get("status") == "created" for s in steps):
+            break
+    return last
 
 
 @app.post("/v1/stop")
@@ -631,18 +889,185 @@ async def v1_activity(device: Device = Depends(_require_device)) -> dict:
     return {"device": device.device_id, "events": audit.get("events", []), "chain_ok": audit.get("chain_ok", True)}
 
 
+# ─── memory (Phase 4) ────────────────────────────────────────────────────────
+
+
+async def _memory_request(method: str, path: str, body: dict | None = None) -> dict | list:
+    url = f"{MEMORY_URL}{path}"
+    try:
+        resp = await _client().request(method, url, json=body, timeout=10.0)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"memory service unreachable: {exc}") from exc
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        payload = {"detail": resp.text}
+    if resp.status_code >= 400:
+        detail = payload.get("detail") if isinstance(payload, dict) else str(payload)
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return payload
+
+
+@app.get("/v1/memory")
+async def v1_memory(device: Device = Depends(_require_device)) -> dict:
+    return {"device": device.device_id, "memories": await _memory_request("GET", "/memory")}
+
+
+@app.post("/v1/memory")
+async def v1_memory_create(
+    req: MemoryCreatePayload, device: Device = Depends(_require_device)
+) -> dict:
+    memory = await _memory_request("POST", "/memory", req.model_dump())
+    return {"device": device.device_id, "memory": memory}
+
+
+@app.post("/v1/memory/correct/{memory_id}")
+async def v1_memory_correct(
+    memory_id: str, req: MemoryCorrectPayload, device: Device = Depends(_require_device)
+) -> dict:
+    memory = await _memory_request(
+        "POST", f"/memory/correct/{memory_id}", req.model_dump(exclude_none=True)
+    )
+    return {"device": device.device_id, "memory": memory}
+
+
+@app.delete("/v1/memory/{memory_id}")
+async def v1_memory_delete(memory_id: str, device: Device = Depends(_require_device)) -> dict:
+    result = await _memory_request("DELETE", f"/memory/{memory_id}")
+    return {"device": device.device_id, "result": result}
+
+
+# ─── connections: honest status of every integration ────────────────────────
+
+
+_CONNECTION_CATALOG: list[tuple[str, str, str, str, list[str]]] = [
+    ("gmail", "Gmail", "communication", "VIORUS_GMAIL_URL", ["Read unread mail", "Draft summaries"]),
+    ("calendar", "Calendar", "communication", "VIORUS_CALENDAR_URL", ["Upcoming events"]),
+    ("whatsapp", "WhatsApp", "communication", "VIORUS_WHATSAPP_URL", ["Read digest", "Send after approval"]),
+    ("contacts", "Contacts", "knowledge", "VIORUS_CONTACTS_URL", ["Search people"]),
+    ("notes", "Notes", "knowledge", "VIORUS_NOTES_URL", ["Recent notes"]),
+    ("bookmarks", "Bookmarks", "knowledge", "VIORUS_BOOKMARKS_URL", ["Search saved links"]),
+    ("history", "Browser history", "knowledge", "VIORUS_HISTORY_URL", ["Recent pages"]),
+    ("cloud_files", "Cloud files", "knowledge", "VIORUS_CLOUD_FILES_URL", ["Recent documents"]),
+    ("telephony", "Telephony", "actions", "VIORUS_TELEPHONY_URL", ["Prepare a call (never auto-dial)"]),
+    ("reservations", "Reservations", "actions", "VIORUS_RESERVATIONS_URL", ["Search slots", "Book after approval"]),
+    ("smart_home", "Smart home", "actions", "VIORUS_SMART_HOME_URL", ["Read status", "Control after approval"]),
+    ("computer", "Computer agent", "actions", "VIORUS_COMPUTER_URL", ["Screen mirror", "Remote input after approval"]),
+]
+
+
+async def _probe(url: str, timeout: float = 1.2) -> tuple[bool, str]:
+    try:
+        resp = await _client().get(url, timeout=timeout)
+        return True, f"reachable (HTTP {resp.status_code})"
+    except httpx.RequestError:
+        return False, "not reachable"
+    except Exception:  # noqa: BLE001
+        return False, "not reachable"
+
+
+async def _unconfigured() -> tuple[bool, str]:
+    """No URL in the environment: report honestly instead of probing."""
+    return False, "not configured"
+
+
+@app.get("/v1/connections")
+async def v1_connections(device: Device = Depends(_require_device)) -> dict:
+    """Report what is actually configured and reachable. Never invents a
+    connected state: an unreachable connector is reported as not configured,
+    and demo connectors are labelled as sample data."""
+    demo_mode = os.getenv("VIORIS_DEMO_CONNECTORS", "0") == "1"
+
+    # The computer agent is a real local daemon, not a sample connector: its
+    # health is the same endpoint the task-runner uses, and it stays local
+    # even while the sample connectors are switched on.
+    health_path = {"computer": "/windows"}
+    local_only = {"computer"}
+
+    async def probe_entry(key: str, env: str) -> tuple[bool, str]:
+        base = os.getenv(env)
+        if not base:
+            return await _unconfigured()
+        return await _probe(base.rstrip("/") + health_path.get(key, "/health"))
+
+    probes = await asyncio.gather(
+        *(probe_entry(key, env) for key, _, _, env, _ in _CONNECTION_CATALOG)
+    )
+    items = []
+    for (key, name, category, env, capabilities), (reachable, detail) in zip(
+        _CONNECTION_CATALOG, probes, strict=True
+    ):
+        if not reachable:
+            mode = "off"
+        elif key in local_only:
+            mode = "local"
+        else:
+            mode = "demo" if demo_mode else "live"
+        items.append(
+            {
+                "id": key,
+                "name": name,
+                "category": category,
+                "configured": reachable,
+                "mode": mode,
+                "detail": detail,
+                "capabilities": capabilities,
+                "note": (
+                    "Sample data — no real account is connected."
+                    if mode == "demo"
+                    else ("" if reachable else f"Set {env} to enable.")
+                ),
+            }
+        )
+
+    ollama_base = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+    (memory_ok, memory_detail), (ollama_ok, ollama_detail) = await asyncio.gather(
+        _probe(MEMORY_URL.rstrip("/") + "/memory"),
+        _probe(ollama_base + "/api/tags"),
+    )
+    items.append(
+        {
+            "id": "memory",
+            "name": "Memory",
+            "category": "local",
+            "configured": memory_ok,
+            "mode": "local" if memory_ok else "off",
+            "detail": memory_detail,
+            "capabilities": ["Preferences", "People", "Projects", "Routines", "Sensitive (opt-in)"],
+            "note": "" if memory_ok else "Memory service is not running.",
+        }
+    )
+
+    items.append(
+        {
+            "id": "ollama",
+            "name": "Local planner (Ollama)",
+            "category": "local",
+            "configured": ollama_ok,
+            "mode": "local" if ollama_ok else "off",
+            "detail": ollama_detail,
+            "capabilities": ["Freeform planning", "Local only · $0 per call"],
+            "note": "" if ollama_ok else "Freeform planning falls back to deterministic workflows.",
+        }
+    )
+
+    return {
+        "device": device.device_id,
+        "demo_mode": demo_mode,
+        "connections": items,
+        "configured_count": sum(1 for i in items if i["configured"]),
+        "total": len(items),
+    }
+
+
 # ─── Phase 5 remote control (Prompt 5.3) ─────────────────────────────────────
-
-
-COMPUTER_URL = os.getenv("VIORUS_COMPUTER_URL", "http://127.0.0.1:8430")
 
 
 async def _computer_request(method: str, path: str, body: dict | None = None) -> dict:
     """Talk to the computer agent daemon. It is localhost-only and session-gated."""
     url = f"{COMPUTER_URL}{path}"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.request(method, url, json=body)
+        resp = await _client().request(method, url, json=body, timeout=10.0)
     except httpx.RequestError as exc:
         raise HTTPException(status_code=503, detail=f"computer agent unreachable: {exc}") from exc
     try:
@@ -659,8 +1084,7 @@ async def _computer_request_bytes(method: str, path: str) -> bytes:
     """Fetch a binary payload (e.g. a PNG frame) from the computer agent."""
     url = f"{COMPUTER_URL}{path}"
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.request(method, url)
+        resp = await _client().request(method, url, timeout=15.0)
     except httpx.RequestError as exc:
         raise HTTPException(status_code=503, detail=f"computer agent unreachable: {exc}") from exc
     if resp.status_code >= 400:
@@ -791,6 +1215,39 @@ async def v1_remote_input(req: RemoteInputRequest, device: Device = Depends(_req
 
 
 # ─── existing endpoints ──────────────────────────────────────────────────────
+
+
+@app.get("/v1/system/status")
+async def v1_system_status(device: Device = Depends(_require_device)) -> dict:
+    """Honest runtime state for Settings: what is actually live and locked."""
+    demo_mode = os.getenv("VIORIS_DEMO_CONNECTORS", "0") == "1"
+    critical_pin = bool(os.getenv("VIORIS_CRITICAL_PIN", ""))
+    (runner_ok, runner_detail), (memory_ok, memory_detail), (computer_ok, computer_detail) = (
+        await asyncio.gather(
+            _probe(TASK_RUNNER_URL.rstrip("/") + "/tasks"),
+            _probe(MEMORY_URL.rstrip("/") + "/memory"),
+            _probe(COMPUTER_URL.rstrip("/") + "/windows"),
+        )
+    )
+    return {
+        "device": device.device_id,
+        "registry_frozen": PermissionEngine._frozen,
+        "tools_registered": len(PermissionEngine.list_tools()),
+        "demo_mode": demo_mode,
+        "critical_actions": "unlocked" if critical_pin else "locked",
+        "critical_note": (
+            "Critical approvals require the local PIN plus a 5s cooldown."
+            if critical_pin
+            else "Set VIORIS_CRITICAL_PIN to allow Critical approvals. They stay blocked until then."
+        ),
+        "local_only": True,
+        "task_runner": TASK_RUNNER_URL,
+        "memory_service": MEMORY_URL,
+        "computer_agent": COMPUTER_URL,
+        "task_runner_state": {"reachable": runner_ok, "detail": runner_detail},
+        "memory_state": {"reachable": memory_ok, "detail": memory_detail},
+        "computer_agent_state": {"reachable": computer_ok, "detail": computer_detail},
+    }
 
 
 @app.get("/health")

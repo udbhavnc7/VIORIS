@@ -60,19 +60,20 @@ class TestRetryIdempotency:
         step.status = TaskStatus.FAILED
         task.status = TaskStatus.FAILED
 
-        # Retry — should get new idempotency key and invalidation event
+        # Retry — previous consent is invalidated, but the idempotency key is
+        # preserved so a conforming tool can deduplicate the retried side effect
         events = engine.retry_step(task, step.step_id)
         assert step.status == TaskStatus.CREATED
-        assert step.idempotency_key != old_key  # new key for re-approval
+        assert step.idempotency_key == old_key
         assert step.error is None
 
         # Should have an audit event about the invalidation
         invalidation_events = [e for e in events if e["action"].value == "requested_approval"]
         assert len(invalidation_events) == 1
-        assert invalidation_events[0]["detail"]["reason"] == "retry — previous approval invalidated"
+        assert "previous approval invalidated" in invalidation_events[0]["detail"]["reason"]
 
-    def test_retry_critical_step_gets_new_idempotency_key(self, engine):
-        """Critical-tier retries get a fresh idempotency_key."""
+    def test_retry_critical_step_preserves_idempotency_key(self, engine):
+        """Critical-tier retries keep the same key (dedupe) but need re-approval."""
         step = _make_step("system.register_payment", RiskTier.CRITICAL)
         task = engine.create_task("test", [step])
         engine.start(task)
@@ -81,8 +82,8 @@ class TestRetryIdempotency:
         step.status = TaskStatus.FAILED
         task.status = TaskStatus.FAILED
 
-        events = engine.retry_step(task, step.step_id)
-        assert step.idempotency_key != old_key
+        engine.retry_step(task, step.step_id)
+        assert step.idempotency_key == old_key
 
     def test_retry_requires_previous_failure(self, engine):
         """Cannot retry a step that hasn't failed."""

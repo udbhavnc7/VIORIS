@@ -65,9 +65,10 @@ class TaskEngine:
         max_attempts: int = 3,
         approval_store=None,
     ) -> None:
-        # verify(step, result) -> (ok: bool, note: str). Defaults to accepting
-        # any non-error result (still stricter than "tool returned without error").
-        self.verify = verify or (lambda _step, _result: (True, "result accepted"))
+        # verify(step, result) -> (ok: bool, note: str). The default is
+        # deliberately strict: a result must explicitly report ok=True. A tool
+        # that returns a payload without confirmation did NOT verify.
+        self.verify = verify or _default_verify
         self.max_attempts = max_attempts
         self.attempts: dict[str, int] = {}  # step_id -> attempt count
         self.approval_store = approval_store
@@ -133,6 +134,18 @@ class TaskEngine:
         non-error return — the verifier must pass first.
         """
         events: list[dict] = []
+        # A paused, stopped, cancelled, or finished task is a hard barrier.
+        # Without this, calling run on a stopped task would still fire tools.
+        if task.status not in (TaskStatus.CREATED, TaskStatus.RUNNING):
+            return (
+                StepOutcome(
+                    None,
+                    ok=False,
+                    error=f"task is {task.status.value}; refusing to execute",
+                ),
+                events,
+            )
+
         step = next((s for s in task.steps if s.status == TaskStatus.CREATED), None)
         if step is None:
             return StepOutcome(None, ok=False, error="no runnable step"), events
@@ -156,9 +169,14 @@ class TaskEngine:
         #    must never fire while in WAITING_APPROVAL. ────────────────────
         needs_approval = _requires_approval(step)
         if needs_approval:
+            args = (step.result or {}).get("args") or {}
             approved = (
                 self.approval_store.is_approved_for_step(
-                    task.task_id, step.step_id, step.idempotency_key
+                    task.task_id,
+                    step.step_id,
+                    step.idempotency_key,
+                    tool=step.tool,
+                    args=args,
                 )
                 if self.approval_store is not None
                 else False
@@ -253,16 +271,12 @@ class TaskEngine:
         if step.status != TaskStatus.FAILED:
             raise InvalidTransitionError(f"step {step_id} is {step.status.value}, not failed")
 
-        # For Execute/Critical steps: invalidate any stale approval.
-        # A retried step must re-validate permission and re-diff against
-        # current state — we never replay a stale approval.
+        # For Execute/Critical steps: invalidate any stale approval. The step
+        # keeps its idempotency_key so a conforming tool can deduplicate a
+        # retry — re-keying would allow the same side effect to fire twice.
         if _requires_approval(step):
             if self.approval_store is not None:
-                # Invalidate all previous approvals for this step
                 self.approval_store.invalidate_for_step(task.task_id, step.step_id)
-            # Generate a new idempotency_key so the old approval can't be reused
-            import uuid
-            step.idempotency_key = uuid.uuid4().hex
             events.append(
                 _ev(
                     "system",
@@ -271,7 +285,7 @@ class TaskEngine:
                         "step": step.step_id,
                         "tool": step.tool,
                         "idempotency_key": step.idempotency_key,
-                        "reason": "retry — previous approval invalidated",
+                        "reason": "retry — previous approval invalidated, key preserved",
                     },
                 )
             )
@@ -326,6 +340,21 @@ def _requires_approval(step: TaskStep) -> bool:
         # Unknown tools are already refused at planning time; if one reaches
         # execution it is treated as requiring approval (blocked).
         return True
+
+
+def _default_verify(step: TaskStep, result: dict | None) -> tuple[bool, str]:
+    """Conservative default verification.
+
+    "The call returned" is not success. The executor must explicitly report
+    ok=True and must not carry an error. Anything else is unverified.
+    """
+    if not isinstance(result, dict):
+        return False, "no verifiable result"
+    if result.get("ok") is not True:
+        return False, str(result.get("error") or "tool did not confirm success")
+    if result.get("error"):
+        return False, str(result["error"])
+    return True, "tool reported ok"
 
 
 def _now():

@@ -2,6 +2,7 @@
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from services.api_gateway.app import main as gw
 from services.api_gateway.app.pairing import PairingStore
@@ -26,12 +27,17 @@ def test_full_pair_flow(client):
     assert exchange.status_code == 200
     assert exchange.json()["token_type"] == "bearer"
     assert exchange.json()["jwt"]
+    auth = {"Authorization": f"Bearer {exchange.json()['jwt']}"}
 
-    listed = client.get("/devices").json()
+    assert client.get("/devices").status_code == 401
+    listed = client.get("/devices", headers=auth).json()
     assert len(listed) == 1 and listed[0]["device_id"] == pid
 
-    revoke = client.post(f"/devices/{pid}/revoke")
+    revoke = client.post(f"/devices/{pid}/revoke", headers=auth)
     assert revoke.status_code == 200 and revoke.json()["revoked"] is True
+
+    # A revoked device's JWT stops working immediately.
+    assert client.get("/v1/tasks", headers=auth).status_code == 403
 
 
 def test_exchange_rejects_wrong_device(client):
@@ -44,11 +50,17 @@ def test_exchange_rejects_wrong_device(client):
 
 
 def test_ws_rejects_bad_token(client):
-    """Bad token: connection accepted but client_id is anonymous."""
-    with client.websocket_connect("/ws/device?token=nonsense") as ws:
-        msg = ws.receive_json()
-        assert msg["type"] == "connected"
-        assert msg["payload"]["client_id"].startswith("anon-")
+    """Bad token: the socket is rejected before it is accepted (fail closed)."""
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws/device?token=nonsense"):
+            pass
+
+
+def test_ws_rejects_missing_token(client):
+    """No token at all: rejected, never accepted as an anonymous listener."""
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws/device"):
+            pass
 
 
 def test_ws_accepts_valid_device(client):

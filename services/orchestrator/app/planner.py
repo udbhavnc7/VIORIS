@@ -15,6 +15,7 @@ plans before execution).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 from packages.shared.intent_classifier import classify_intent, IntentType
@@ -53,16 +54,27 @@ class Plan:
 
 
 class Planner:
-    def __init__(self, backend: callable | None = None) -> None:
+    def __init__(self, backend: callable | None = None, deterministic: bool | None = None) -> None:
         self.backend = backend or OllamaBackend()
+        # Deterministic workflow routing is the offline-first default. An
+        # explicitly injected backend means the caller wants the model to plan
+        # (tests, custom models), so routing only runs when asked for it.
+        self.deterministic = deterministic if deterministic is not None else backend is None
 
     def plan(self, transcript: str) -> Plan:
         """Plan a transcript without executing anything. Returns JSON-able Plan.
 
         Routes simple intents (single queries/commands) through a fast direct
-        path that skips the LLM planner entirely. Complex or ambiguous requests
-        go through the full LLM planning pipeline.
+        path that skips the LLM planner entirely. Deterministic multi-step
+        workflows (briefing, messaging, reservations) also route here so the
+        product works without a local model installed. Complex or ambiguous
+        requests go through the full LLM planning pipeline.
         """
+        if self.deterministic:
+            direct = self._workflow_route(transcript)
+            if direct is not None:
+                return direct
+
         # Fast path: classify intent before hitting the LLM
         intent = classify_intent(transcript)
         if intent.is_simple:
@@ -92,6 +104,102 @@ class Planner:
             return Plan(request=transcript, error=str(exc))
 
         return self._to_plan(transcript, result.get("tool_calls", []))
+
+    def _workflow_route(self, transcript: str) -> Plan | None:
+        """Deterministic routes for the product's primary workflows.
+
+        These run without an LLM, which keeps the core loop usable offline and
+        makes demo/observe workflows reproducible. The LLM never assigns risk:
+        each tier still comes from the frozen registry. Returns None when no
+        workflow matches so the normal classifier/LLM path can take over.
+        """
+        text = transcript.strip()
+        lower = text.lower()
+        # A compound request ("check my email and open chrome") must never be
+        # narrowed to its first clause here — that would silently drop the rest.
+        compound = bool(re.search(r"\b(and|then|also|plus)\b", lower))
+
+        def make(tool: str, args: dict | None = None, agent: str = "system") -> TaskStep:
+            return TaskStep(
+                agent=agent,
+                tool=tool,
+                risk_level=PermissionEngine.classify(tool).tier,
+                result={"args": args or {}},
+            )
+
+        # ── briefing: three observe reads, nothing sent ───────────────────
+        if re.search(r"\b(brief|briefing|digest|catch me up|on my plate|daily summary)\b", lower):
+            return Plan(
+                request=transcript,
+                steps=[
+                    make("gmail.read_unread", {"hours": 24, "max_results": 5}),
+                    make("calendar.read_upcoming", {"hours": 24, "max_results": 5}),
+                    make("whatsapp.read_digest", {"hours": 24, "max_messages": 5}),
+                ],
+            )
+
+        # ── messaging: execute-tier, pauses for approval ─────────────────
+        msg = re.search(
+            r"\b(?:send|text|message)\s+(?:a\s+)?(?:message\s+|text\s+)?to\s+(.+?)\s+"
+            r"(?:saying|that says|about|:)\s*(.+)$",
+            text,
+            re.I,
+        )
+        if msg:
+            recipient = msg.group(1).strip(" ,.")
+            content = msg.group(2).strip().strip('"').strip("'")
+            if recipient and content:
+                return Plan(
+                    request=transcript,
+                    steps=[
+                        make(
+                            "system.send_message",
+                            {
+                                "recipient": recipient,
+                                "content": content,
+                                "channel": "whatsapp",
+                            },
+                        )
+                    ],
+                )
+
+        # ── reservations: observe search first ───────────────────────────
+        reserve = re.search(
+            r"\b(?:reserve|book|reservation)\b.*?\bat\s+(.+?)(?:\s+for\s+(\d+))?(?:\s+(?:on|tomorrow|today).*)?$",
+            text,
+            re.I,
+        )
+        if re.search(r"\b(reserve|book a table|reservation)\b", lower) and reserve:
+            venue = reserve.group(1).strip(" ,.")
+            party = int(reserve.group(2)) if reserve.group(2) else 2
+            return Plan(
+                request=transcript,
+                steps=[
+                    make("reservations.search_slots", {"venue": venue, "party_size": party})
+                ],
+            )
+
+        # ── single observe reads ─────────────────────────────────────────
+        if compound:
+            return None
+        if re.search(r"\b(unread|inbox|mail|email)\b", lower) and re.search(
+            r"\b(check|read|any|what|show|new)\b", lower
+        ):
+            return Plan(request=transcript, steps=[make("gmail.read_unread")])
+        if re.search(r"\b(calendar|schedule|meetings?|appointments?)\b", lower):
+            return Plan(request=transcript, steps=[make("calendar.read_upcoming")])
+        if re.search(r"\b(whatsapp|messages?|texts?)\b", lower) and re.search(
+            r"\b(check|read|any|what|show|new)\b", lower
+        ):
+            return Plan(request=transcript, steps=[make("whatsapp.read_digest")])
+        contact = re.search(r"\b(?:find|search|look up)\s+(?:contact\s+)?(.+?)(?:\s+in\s+contacts)?$", text, re.I)
+        if "contact" in lower and contact:
+            return Plan(
+                request=transcript,
+                steps=[make("contacts.search", {"query": contact.group(1).strip(" .?")})],
+            )
+
+        return None
 
     def _direct_route(self, transcript: str, intent: "ClassifiedIntent") -> Plan:
         """Handle simple intents without the LLM planner.

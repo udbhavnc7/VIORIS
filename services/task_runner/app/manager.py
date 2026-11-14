@@ -23,7 +23,7 @@ from pathlib import Path
 from packages.shared.audit import GENESIS_HASH, event_payload
 from packages.shared.schemas import Task, TaskStatus, TaskStep
 
-from .approvals import ApprovalStore
+from .approvals import ApprovalStore, action_hash
 from .engine import StepOutcome, TaskEngine
 from .events import EventHub
 
@@ -66,6 +66,31 @@ class TaskManager:
         self.approvals = ApprovalStore(self.db_path)
         self.events = events or EventHub()
         self.engine = engine or TaskEngine(approval_store=self.approvals)
+        self._reconcile_inflight()
+
+    def _reconcile_inflight(self) -> None:
+        """A step left RUNNING by a crash has an UNKNOWN external outcome.
+
+        We mark it failed instead of re-running it: retrying could duplicate a
+        side effect that already happened. The user can retry explicitly,
+        which re-arms it under the same idempotency key.
+        """
+        for task in self.list_tasks(limit=100000):
+            changed = False
+            for step in task.steps:
+                if step.status == TaskStatus.RUNNING:
+                    step.status = TaskStatus.FAILED
+                    step.error = "process stopped during execution — outcome unknown; not retried automatically"
+                    changed = True
+            if changed and task.status == TaskStatus.RUNNING:
+                task.status = TaskStatus.FAILED
+                self._persist(task)
+                self.append_audit(
+                    "system",
+                    "failed",
+                    {"reason": "crash recovery: in-flight step outcome unknown"},
+                    task.task_id,
+                )
 
     def close(self) -> None:
         with self._lock:
@@ -116,7 +141,7 @@ class TaskManager:
         non-terminal task. Any step still WAITING_APPROVAL is purged so a
         late Approve can never fire it — stop is a hard stop."""
         affected: list[str] = []
-        tasks = self.list_tasks(limit=500)
+        tasks = self.list_tasks(limit=100000)
         for task in tasks:
             if task.status.value in ("cancelled", "completed", "failed", "stopped"):
                 continue
@@ -145,7 +170,28 @@ class TaskManager:
         """Run one pending step; if it was the last, finalize.
         If the engine pauses for approval, create the ApprovalRequest."""
         task = self.get(task_id)
-        outcome, events = self.engine.run_next_step(task, execute)
+
+        # `system.stop` is the user's kill switch. Route it to the manager so
+        # it halts EVERY task, not merely the one that requested it.
+        next_step = next((s for s in task.steps if s.status == TaskStatus.CREATED), None)
+        if (
+            task.status in (TaskStatus.CREATED, TaskStatus.RUNNING)
+            and next_step is not None
+            and next_step.tool == "system.stop"
+        ):
+            stopped = self.stop_all()
+            stopped_task = self.get(task_id)
+            return stopped_task, StepOutcome(
+                next_step, ok=True, result={"ok": True, "stopped": stopped}
+            )
+
+        def _wrapped(step, run_task):
+            # Persist the RUNNING marker before the external call so a crash
+            # leaves evidence and is reconciled instead of silently re-run.
+            self._persist(run_task)
+            return execute(step, run_task)
+
+        outcome, events = self.engine.run_next_step(task, _wrapped)
         for ev in events:
             self.append_audit(ev["actor"], ev["action"], ev["detail"], task.task_id)
         if outcome.step is not None and outcome.step.status == TaskStatus.WAITING_APPROVAL:
@@ -194,6 +240,13 @@ class TaskManager:
             raise ValueError("approval step is not pending on this task")
         if approval.idempotency_key != step.idempotency_key:
             raise ValueError("approval does not match this step's current idempotency key")
+        # Consent is bound to the exact action: if the recipient/content/tool
+        # changed after the card was shown, the approval is stale and must not fire.
+        current_args = (step.result or {}).get("args") or {}
+        if approval.tool != step.tool:
+            raise ValueError("approval tool does not match the pending step")
+        if approval.action_hash and approval.action_hash != action_hash(step.tool, current_args):
+            raise ValueError("approval was granted for different action contents")
         self.approvals.approve(approval)
         self.engine.arm_step(task, step.step_id)  # WAITING_APPROVAL -> CREATED
         self._persist(task)

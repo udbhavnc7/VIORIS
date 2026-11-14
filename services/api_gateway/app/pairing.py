@@ -20,6 +20,7 @@ the env var).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -28,6 +29,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import jwt
 
@@ -89,14 +91,74 @@ class ExchangedToken:
 
 
 class PairingStore:
-    """In-memory pairing ledger: pending tokens + known devices."""
+    """Pairing ledger: pending tokens + known devices.
 
-    def __init__(self, secret: str | None = None, token_ttl: int = DEFAULT_TOKEN_TTL_SECONDS) -> None:
-        self._secret = secret or os.getenv("VIORIS_PAIRING_SECRET") or secrets.token_hex(32)
-        self.token_ttl = token_ttl
+    With `store_path` set, devices and the signing secret persist to a local
+    JSON file (mode 0600 where the OS supports it). That makes revocation
+    survive a restart — an in-memory list would silently un-revoke every
+    device. Without a path the store is deliberately in-memory so tests never
+    share state.
+    """
+
+    def __init__(
+        self,
+        secret: str | None = None,
+        token_ttl: int = DEFAULT_TOKEN_TTL_SECONDS,
+        store_path: str | Path | None = None,
+    ) -> None:
         self._lock = threading.Lock()
         self._pending: dict[str, tuple[str, float]] = {}  # pairing -> (device_id, expires)
         self._devices: dict[str, Device] = {}
+        self._store_path = Path(store_path) if store_path else None
+        self._persisted_secret: str | None = None
+
+        if self._store_path is not None:
+            self._load()
+
+        self._secret = (
+            secret
+            or os.getenv("VIORIS_PAIRING_SECRET")
+            or self._persisted_secret
+            or secrets.token_hex(32)
+        )
+        self.token_ttl = token_ttl
+
+        if self._store_path is not None:
+            self._save()
+
+    # ── persistence ───────────────────────────────────────────────────────
+    def _load(self) -> None:
+        assert self._store_path is not None
+        try:
+            raw = json.loads(self._store_path.read_text("utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+        self._persisted_secret = raw.get("secret")
+        for item in raw.get("devices", []):
+            try:
+                device = Device(**item)
+            except TypeError:
+                continue
+            if device.device_id and not device.revoked:
+                self._devices[device.device_id] = device
+        if self._persisted_secret:
+            logger.info("Loaded %d paired device(s)", len(self._devices))
+
+    def _save(self) -> None:
+        if self._store_path is None:
+            return
+        self._store_path.parent.mkdir(parents=True, exist_ok=True)
+        body = {
+            "secret": self._secret,
+            "devices": [d.to_dict() for d in self._devices.values()],
+        }
+        tmp = self._store_path.with_suffix(self._store_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(body, indent=2), "utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:  # pragma: no cover - Windows may not support it
+            pass
+        tmp.replace(self._store_path)
 
     # ── step 1: issue pairing token ───────────────────────────────────────
     def issue_pairing(self, name: str) -> PairingProof:
@@ -111,6 +173,7 @@ class PairingStore:
             self._devices[device_id] = Device(
                 device_id=device_id, name=name, created_at=_now().isoformat()
             )
+            self._save()
         return PairingProof(device_id=device_id, token=token, expires_at=expires)
 
     # ── step 2: exchange scanned token for a device JWT ─────────────────
@@ -162,14 +225,10 @@ class PairingStore:
             raise InvalidDeviceTokenError("token has no subject")
         with self._lock:
             device = self._devices.get(device_id)
-            if device is None:
-                # Validly signed token from our secret: restore device in memory
-                device = Device(
-                    device_id=device_id,
-                    name=payload.get("name", "Phone"),
-                    created_at=_now().isoformat(),
-                )
-                self._devices[device_id] = device
+        if device is None:
+            # A validly signed token for a device we no longer know is NOT
+            # enough: it may have been revoked and then forgotten. Fail closed.
+            raise InvalidDeviceTokenError("device is not paired")
         if device.revoked:
             raise DeviceRevokedError(f"device '{device_id}' is revoked")
         return device
@@ -186,6 +245,7 @@ class PairingStore:
             if device is None:
                 return False
             device.revoked = True
+            self._save()
             return True
 
 

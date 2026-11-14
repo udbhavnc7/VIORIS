@@ -45,7 +45,7 @@ class OllamaEmbedder:
 
     def embed(self, text: str) -> list[float]:
         try:
-            with httpx.Client(timeout=self.timeout) as client:
+            with httpx.Client(timeout=self.timeout, trust_env=False) as client:
                 resp = client.post(
                     f"{self.base_url}/api/embed",
                     json={"model": self.model, "input": text},

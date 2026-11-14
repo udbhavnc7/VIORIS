@@ -348,13 +348,13 @@ class ProactiveCallPipeline:
                         "recipient": matched_candidate.name,
                         "email": matched_candidate.email,
                         "body": message,
-                        "status": "sent",
-                        "description": f"sent mail to {matched_candidate.name} ({matched_candidate.email}): '{message}'",
+                        "status": "not_sent",
+                        "description": f"prepared mail to {matched_candidate.name} ({matched_candidate.email}): '{message}' — not sent",
                     }
-                    session.metadata.setdefault("sent_emails", []).append(action_payload)
+                    session.metadata.setdefault("prepared_emails", []).append(action_payload)
                     session.status = DigestStatus.RESPONSE_RECEIVED
                     return {
-                        "response_text": f"Sure, I've sent the mail to {matched_candidate.name} saying '{message}'. Is there anything else I need to do?",
+                        "response_text": f"I've prepared a mail to {matched_candidate.name} saying '{message}'. It has not been sent — no mail transport is configured. Anything else?",
                         "action": action_payload,
                         "digest_status": "awaiting_response",
                     }
@@ -376,13 +376,13 @@ class ProactiveCallPipeline:
                         "recipient": chosen.name,
                         "email": chosen.email,
                         "body": body,
-                        "status": "sent",
-                        "description": f"sent mail to {chosen.name} ({chosen.email}): '{body}'",
+                        "status": "not_sent",
+                        "description": f"prepared mail to {chosen.name} ({chosen.email}): '{body}' — not sent",
                     }
-                    session.metadata.setdefault("sent_emails", []).append(action_payload)
+                    session.metadata.setdefault("prepared_emails", []).append(action_payload)
                     session.status = DigestStatus.RESPONSE_RECEIVED
                     return {
-                        "response_text": f"Sure, I've sent the mail to {chosen.name} saying '{body}'. Is there anything else I need to do?",
+                        "response_text": f"I've prepared a mail to {chosen.name} saying '{body}'. It has not been sent — no mail transport is configured. Anything else?",
                         "action": action_payload,
                         "digest_status": "awaiting_response",
                     }
@@ -407,13 +407,13 @@ class ProactiveCallPipeline:
                     "recipient": chosen.name,
                     "email": chosen.email,
                     "body": body,
-                    "status": "sent",
-                    "description": f"sent mail to {chosen.name} ({chosen.email}): '{body}'",
+                    "status": "not_sent",
+                    "description": f"prepared mail to {chosen.name} ({chosen.email}): '{body}' — not sent",
                 }
-                session.metadata.setdefault("sent_emails", []).append(action_payload)
+                session.metadata.setdefault("prepared_emails", []).append(action_payload)
                 session.status = DigestStatus.RESPONSE_RECEIVED
                 return {
-                    "response_text": f"Sure, I've sent the mail to {chosen.name} saying '{body}'. Is there anything else I need to do?",
+                    "response_text": f"I've prepared a mail to {chosen.name} saying '{body}'. It has not been sent — no mail transport is configured. Anything else?",
                     "action": action_payload,
                     "digest_status": "awaiting_response",
                 }
@@ -444,21 +444,23 @@ class ProactiveCallPipeline:
                     "type": "react_email",
                     "target": "RazorClub",
                     "reaction": reaction,
-                    "description": f"reacted {reaction} to RazorClub mail",
+                    "status": "not_executed",
+                    "description": f"prepared {reaction} reaction to RazorClub mail — not executed (demo mode)",
                 },
                 {
                     "type": "send_message",
                     "target": "Disha",
                     "channel": "whatsapp",
                     "message": disha_msg,
-                    "description": f"sent message to Disha: '{disha_msg}'",
+                    "status": "not_sent",
+                    "description": f"prepared message to Disha: '{disha_msg}' — not sent (no transport linked)",
                 },
             ]
-            session.metadata["last_executed"] = actions
+            session.metadata["last_prepared"] = actions
             session.status = DigestStatus.RESPONSE_RECEIVED
             return {
-                "response_text": "Sure Udbhav, I have sent the message and reacted to mail, Is there anything else I need to do?",
-                "action": {"type": "compound_execute", "actions": actions},
+                "response_text": "I've prepared both actions, but nothing was delivered: the mail reaction and WhatsApp transport aren't connected. Want me to queue them once a transport is linked?",
+                "action": {"type": "compound_prepare", "actions": actions},
                 "digest_status": "awaiting_response",
             }
 
