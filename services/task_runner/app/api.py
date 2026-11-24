@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from packages.shared.kill_phrase import detect_kill_phrase
 from packages.shared.permission_engine import (
     PermissionEngine,
     UnknownToolError,
@@ -67,6 +68,14 @@ class StepPayload(BaseModel):
     risk_level: RiskTier = RiskTier.OBSERVE
 
 
+class ExplainQuery(BaseModel):
+    query: str
+
+
+class KillPhraseRequest(BaseModel):
+    transcript: str = ""
+
+
 @app.post("/tasks")
 def create_task(req: CreateTaskRequest) -> dict:
     """Create a task from an explicit plan or by asking the planner.
@@ -75,6 +84,19 @@ def create_task(req: CreateTaskRequest) -> dict:
     `risk_level: "observe"` for an Execute tool does not get a downgrade —
     the registry wins, and an unknown tool is refused outright.
     """
+    # Kill phrase wins over planning. A hijacked or confused plan can never
+    # keep running just because the text also looked like a task request.
+    if detect_kill_phrase(req.request):
+        affected = get_manager().kill_phrase(req.request)
+        return {
+            "killed": True,
+            "stopped": affected,
+            "count": len(affected),
+            "task": None,
+            "task_id": None,
+            "blocked_tools": [],
+        }
+
     blocked_tools: list[dict] = []
     if req.steps:
         steps = []
@@ -90,6 +112,8 @@ def create_task(req: CreateTaskRequest) -> dict:
                     tool=tool,
                     risk_level=tier,
                     result=raw.get("result") or {"args": raw.get("args") or {}},
+                    reasoning=raw.get("reasoning"),
+                    alternatives=raw.get("alternatives") or [],
                 )
             )
     elif req.tool:
@@ -226,6 +250,18 @@ def stop_everything() -> dict:
     return {"stopped": affected, "count": len(affected)}
 
 
+@app.post("/kill-phrase")
+def kill_phrase(req: KillPhraseRequest) -> dict:
+    """Emergency stop triggered by a kill phrase (LLM-independent).
+
+    The caller (voice loop or gateway) is responsible for matching the
+    phrase; this endpoint only performs the hard stop and audit so the same
+    behavior is reachable from every surface.
+    """
+    affected = get_manager().kill_phrase(req.transcript)
+    return {"killed": True, "stopped": affected, "count": len(affected)}
+
+
 CRITICAL_COOLDOWN_SECONDS = 5
 
 
@@ -315,6 +351,37 @@ def audit_events(limit: int = 100) -> dict:
     return {"events": mgr.audit_events_copy(limit), "chain_ok": mgr.verify_chain()[0]}
 
 
+# ── explainability (Phase 8.4 / 10.2) ────────────────────────────────────
+
+
+@app.get("/tasks/{task_id}/explain")
+def explain_task(task_id: str) -> dict:
+    """Every step's reasoning for a task, with a natural-language summary."""
+    try:
+        return get_manager().explain_task(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/tasks/{task_id}/steps/{step_id}/explain")
+def explain_step(task_id: str, step_id: str) -> dict:
+    try:
+        return get_manager().explain_step(task_id, step_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/explain")
+def explain_query(req: ExplainQuery) -> dict:
+    """Answer "why did you do that?" from the recorded reasoning."""
+    return get_manager().explain_query(req.query)
+
+
+@app.get("/explain/recent")
+def explain_recent(limit: int = 20) -> dict:
+    return {"reasoning": get_manager().recent_reasoning(limit=limit)}
+
+
 def _now_ts() -> float:
     return time.time()
 
@@ -349,6 +416,9 @@ def _task_dict(task) -> dict:
                 # Before execution this holds {"args": …}; afterwards it holds
                 # the verified tool result. The UI only reads it for detail.
                 "result": s.result,
+                # Why the planner chose this tool, and what it considered instead.
+                "reasoning": s.reasoning,
+                "alternatives": s.alternatives,
                 "created_at": s.created_at.isoformat(),
             }
             for s in task.steps

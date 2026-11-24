@@ -5,7 +5,7 @@ import { actionTone, clockTime, eventLabel, shortId, titleCase, toolInfo } from 
 import { PageHeader } from "../components/EmptyState";
 import { Icon, type IconName } from "../components/Icon";
 import { useToast } from "../components/Toast";
-import type { AuditEvent } from "../lib/api";
+import { api, formatError, type AuditEvent, type WhyAnswer } from "../lib/api";
 
 const FILTERS = [
   { id: "all", label: "Everything", match: () => true },
@@ -77,6 +77,22 @@ export function Activity() {
   const { push } = useToast();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["id"]>("all");
   const [query, setQuery] = useState("");
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState<WhyAnswer | null>(null);
+  const [asking, setAsking] = useState(false);
+
+  const askWhy = async () => {
+    const text = question.trim();
+    if (!text) return;
+    setAsking(true);
+    try {
+      setAnswer(await api.askWhy(text));
+    } catch (err) {
+      push({ title: "Could not answer that", message: formatError(err), tone: "bad" });
+    } finally {
+      setAsking(false);
+    }
+  };
 
   const filtered = useMemo(() => {
     const active = FILTERS.find((item) => item.id === filter) ?? FILTERS[0];
@@ -154,6 +170,44 @@ export function Activity() {
           </>
         }
       />
+
+      <section className="why-ask">
+        <div className="why-ask-head">
+          <span className="eyebrow">Ask the record</span>
+          <h2>Why did you do that?</h2>
+          <p>Every plan step stores the reason it was chosen. Ask in plain language and read the answer from the same chain.</p>
+        </div>
+        <form
+          className="why-ask-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void askWhy();
+          }}
+        >
+          <label className="search-field">
+            <Icon name="spark" size={15} />
+            <input
+              value={question}
+              onChange={(event) => setQuestion(event.target.value)}
+              placeholder="Why did you read my mail?"
+              aria-label="Ask why an action happened"
+            />
+          </label>
+          <button
+            type="submit"
+            className="btn btn-primary btn-sm"
+            disabled={asking || !question.trim()}
+          >
+            {asking ? "Looking…" : "Ask why"}
+          </button>
+        </form>
+        {answer ? (
+          <div className={`why-answer ${answer.found ? "" : "is-muted"}`}>
+            <span className="why-answer-kind">{titleCase(answer.query_type)}</span>
+            <p>{answer.explanation}</p>
+          </div>
+        ) : null}
+      </section>
 
       <div className="audit-stats">
         <div>

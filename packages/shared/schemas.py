@@ -50,6 +50,11 @@ class TaskStep(BaseModel):
     status: TaskStatus = TaskStatus.CREATED
     result: dict[str, Any] | None = None
     error: str | None = None
+    # Why the planner chose this tool, and what it considered instead. Stored
+    # with the step so "why did you do that?" can be answered from the record
+    # itself rather than reconstructed after the fact.
+    reasoning: str | None = None
+    alternatives: list[dict[str, Any]] = Field(default_factory=list)
     idempotency_key: str = Field(default_factory=lambda: uuid.uuid4().hex)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

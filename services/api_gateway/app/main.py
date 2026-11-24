@@ -33,6 +33,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from packages.shared.kill_phrase import detect_kill_phrase
 from packages.shared.permission_engine import PermissionEngine, register_all_tools
 from packages.shared.second_factor import load_or_create_key, mint, pin_matches
 
@@ -127,6 +128,10 @@ class CreateTaskPayload(BaseModel):
     auto_run: bool = True
 
 
+class KillPhrasePayload(BaseModel):
+    transcript: str = ""
+
+
 class MemoryCreatePayload(BaseModel):
     category: str
     content: str = Field(min_length=1)
@@ -138,6 +143,12 @@ class MemoryCreatePayload(BaseModel):
 class MemoryCorrectPayload(BaseModel):
     content: str = Field(min_length=1)
     category: str | None = None
+
+
+class ExplainQueryPayload(BaseModel):
+    """A natural-language "why did you do that?" question."""
+
+    query: str = Field(min_length=1, max_length=2000)
 
 
 def _device_dict(device) -> DeviceResponse:
@@ -680,6 +691,22 @@ async def v1_create_task(
     optionally starts, and runs steps until the task pauses for approval,
     finishes, or fails. It never skips the approval gate.
     """
+    # Kill phrase is checked before the request reaches the planner. This is
+    # deliberately independent of the LLM and the approval flow: "stop
+    # everything" must stop everything even if planning is confused.
+    if detect_kill_phrase(req.request):
+        killed = await _proxy(
+            "POST", "/kill-phrase", device, {"transcript": req.request}
+        )
+        return {
+            "device": device.device_id,
+            "killed": True,
+            "stopped": killed.get("stopped", []),
+            "task": None,
+            "task_id": None,
+            "blocked_tools": [],
+        }
+
     created = await _proxy(
         "POST",
         "/tasks",
@@ -703,6 +730,48 @@ async def v1_create_task(
 @app.get("/v1/tasks/{task_id}")
 async def v1_task(task_id: str, device: Device = Depends(_require_device)) -> dict:
     return {"device": device.device_id, "task": await _proxy("GET", f"/tasks/{task_id}", device)}
+
+
+@app.get("/v1/tasks/{task_id}/explain")
+async def v1_explain_task(task_id: str, device: Device = Depends(_require_device)) -> dict:
+    """Why every step in a task was chosen (Phase 8.4)."""
+    return {
+        "device": device.device_id,
+        "explanation": await _proxy("GET", f"/tasks/{task_id}/explain", device),
+    }
+
+
+@app.get("/v1/tasks/{task_id}/steps/{step_id}/explain")
+async def v1_explain_step(
+    task_id: str, step_id: str, device: Device = Depends(_require_device)
+) -> dict:
+    return {
+        "device": device.device_id,
+        "explanation": await _proxy(
+            "GET", f"/tasks/{task_id}/steps/{step_id}/explain", device
+        ),
+    }
+
+
+@app.post("/v1/explain")
+async def v1_explain_query(
+    req: ExplainQueryPayload, device: Device = Depends(_require_device)
+) -> dict:
+    """Answer a spoken/text "why did you do that?" from the local record."""
+    return {
+        "device": device.device_id,
+        **(await _proxy("POST", "/explain", device, {"query": req.query})),
+    }
+
+
+@app.get("/v1/explain/recent")
+async def v1_explain_recent(
+    limit: int = 20, device: Device = Depends(_require_device)
+) -> dict:
+    return {
+        "device": device.device_id,
+        **(await _proxy("GET", f"/explain/recent?limit={limit}", device)),
+    }
 
 
 @app.post("/v1/tasks/{task_id}/run")
@@ -874,6 +943,29 @@ async def v1_stop(device: Device = Depends(_require_device)) -> dict:
         "device": device.device_id,
         "result": stop,
         "remote_sessions_ended": ended.get("ended_sessions", 0),
+    }
+
+
+@app.post("/v1/kill-phrase")
+async def v1_kill_phrase(
+    req: KillPhrasePayload, device: Device = Depends(_require_device)
+) -> dict:
+    """Kill-phrase emergency stop, independent of planning/LLM.
+
+    The gateway matches the phrase itself so a device can force a stop even
+    when the planner is unreachable or misbehaving. The task-runner still
+    owns the hard stop and the audit record.
+    """
+    matched = detect_kill_phrase(req.transcript)
+    killed = await _proxy(
+        "POST", "/kill-phrase", device, {"transcript": req.transcript}
+    )
+    return {
+        "device": device.device_id,
+        "matched": matched,
+        "killed": True,
+        "stopped": killed.get("stopped", []),
+        "count": killed.get("count", 0),
     }
 
 

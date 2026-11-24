@@ -98,6 +98,41 @@ def test_approve_reject_and_stop_proxy_with_jwt(client, _stub_proxy):
     assert r.json()["result"]["path"] == "/stop-everything"
 
 
+def test_explain_proxy_routes_with_jwt(client, _stub_proxy):
+    _, jwt = _pair_and_get_jwt(client)
+    headers = {"Authorization": f"Bearer {jwt}"}
+
+    r = client.get("/v1/tasks/task_1/explain", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["explanation"]["path"] == "/tasks/task_1/explain"
+
+    r = client.get("/v1/tasks/task_1/steps/step_1/explain", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["explanation"]["path"] == "/tasks/task_1/steps/step_1/explain"
+
+    r = client.post("/v1/explain", headers=headers, json={"query": "why did you do that?"})
+    assert r.status_code == 200
+    assert r.json()["path"] == "/explain"
+    assert r.json()["body"] == {"query": "why did you do that?"}
+
+    r = client.get("/v1/explain/recent?limit=5", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["path"] == "/explain/recent?limit=5"
+
+
+def test_explain_routes_require_device_jwt(client):
+    checks = [
+        ("get", "/v1/tasks/task_1/explain"),
+        ("get", "/v1/tasks/task_1/steps/step_1/explain"),
+        ("get", "/v1/explain/recent"),
+    ]
+    for method, path in checks:
+        r = getattr(client, method)(path, headers={"Authorization": "Bearer junk"})
+        assert r.status_code in (401, 403), path
+    r = client.post("/v1/explain", json={"query": "why"}, headers={"Authorization": "Bearer junk"})
+    assert r.status_code in (401, 403)
+
+
 def test_call_sessions_expose_iso_timestamps(client, monkeypatch):
     """Call sessions store epoch seconds; the API must hand the UI ISO strings."""
     session = SimpleNamespace(

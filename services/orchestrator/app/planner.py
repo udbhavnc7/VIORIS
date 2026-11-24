@@ -119,12 +119,18 @@ class Planner:
         # narrowed to its first clause here — that would silently drop the rest.
         compound = bool(re.search(r"\b(and|then|also|plus)\b", lower))
 
-        def make(tool: str, args: dict | None = None, agent: str = "system") -> TaskStep:
+        def make(
+            tool: str,
+            args: dict | None = None,
+            agent: str = "system",
+            reason: str = "",
+        ) -> TaskStep:
             return TaskStep(
                 agent=agent,
                 tool=tool,
                 risk_level=PermissionEngine.classify(tool).tier,
                 result={"args": args or {}},
+                reasoning=reason,
             )
 
         # ── briefing: three observe reads, nothing sent ───────────────────
@@ -132,9 +138,21 @@ class Planner:
             return Plan(
                 request=transcript,
                 steps=[
-                    make("gmail.read_unread", {"hours": 24, "max_results": 5}),
-                    make("calendar.read_upcoming", {"hours": 24, "max_results": 5}),
-                    make("whatsapp.read_digest", {"hours": 24, "max_messages": 5}),
+                    make(
+                        "gmail.read_unread",
+                        {"hours": 24, "max_results": 5},
+                        reason="A briefing starts with unread mail so the summary can surface anything waiting on you.",
+                    ),
+                    make(
+                        "calendar.read_upcoming",
+                        {"hours": 24, "max_results": 5},
+                        reason="A briefing also needs today's calendar so the spoken summary can name what is next.",
+                    ),
+                    make(
+                        "whatsapp.read_digest",
+                        {"hours": 24, "max_messages": 5},
+                        reason="Messages are the third read-only source in the briefing workflow; nothing is sent.",
+                    ),
                 ],
             )
 
@@ -159,6 +177,11 @@ class Planner:
                                 "content": content,
                                 "channel": "whatsapp",
                             },
+                            reason=(
+                                "The request named a recipient and message body, so this is the "
+                                "messaging tool. It is Execute-tier and pauses for approval before "
+                                "anything leaves the machine."
+                            ),
                         )
                     ],
                 )
@@ -175,7 +198,14 @@ class Planner:
             return Plan(
                 request=transcript,
                 steps=[
-                    make("reservations.search_slots", {"venue": venue, "party_size": party})
+                    make(
+                        "reservations.search_slots",
+                        {"venue": venue, "party_size": party},
+                        reason=(
+                            "Searching available slots is Observe-tier, so the plan looks before "
+                            "it books. Creating a reservation would need a separate approval."
+                        ),
+                    )
                 ],
             )
 
@@ -185,18 +215,48 @@ class Planner:
         if re.search(r"\b(unread|inbox|mail|email)\b", lower) and re.search(
             r"\b(check|read|any|what|show|new)\b", lower
         ):
-            return Plan(request=transcript, steps=[make("gmail.read_unread")])
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "gmail.read_unread",
+                        reason="The request asked to check mail, and this is the read-only unread-mail tool.",
+                    )
+                ],
+            )
         if re.search(r"\b(calendar|schedule|meetings?|appointments?)\b", lower):
-            return Plan(request=transcript, steps=[make("calendar.read_upcoming")])
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "calendar.read_upcoming",
+                        reason="The request mentioned the calendar, so the plan reads upcoming events instead of changing them.",
+                    )
+                ],
+            )
         if re.search(r"\b(whatsapp|messages?|texts?)\b", lower) and re.search(
             r"\b(check|read|any|what|show|new)\b", lower
         ):
-            return Plan(request=transcript, steps=[make("whatsapp.read_digest")])
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "whatsapp.read_digest",
+                        reason="The request asked for messages, and this tool reads a digest without sending anything.",
+                    )
+                ],
+            )
         contact = re.search(r"\b(?:find|search|look up)\s+(?:contact\s+)?(.+?)(?:\s+in\s+contacts)?$", text, re.I)
         if "contact" in lower and contact:
             return Plan(
                 request=transcript,
-                steps=[make("contacts.search", {"query": contact.group(1).strip(" .?")})],
+                steps=[
+                    make(
+                        "contacts.search",
+                        {"query": contact.group(1).strip(" .?")},
+                        reason="The request was a contact lookup, so the plan searches the contact book read-only.",
+                    )
+                ],
             )
 
         return None
@@ -222,6 +282,7 @@ class Planner:
                         tool="system.get_time",
                         risk_level=PermissionEngine.classify("system.get_time").tier,
                         result={"args": {}},
+                        reasoning="The intent classifier matched a time query; this is the read-only clock tool.",
                     )
                 ],
             )
@@ -236,6 +297,7 @@ class Planner:
                         tool="system.stop",
                         risk_level=PermissionEngine.classify("system.stop").tier,
                         result={"args": {}},
+                        reasoning="The request was an explicit stop command; the kill switch routes to the manager and halts every task.",
                     )
                 ],
             )
@@ -255,6 +317,7 @@ class Planner:
                             tool="system.open_app",
                             risk_level=PermissionEngine.classify("system.open_app").tier,
                             result={"args": {"app": app_name}},
+                            reasoning=f"The request asked to open '{app_name}', and this is the observe-tier app launcher.",
                         )
                     ],
                 )
@@ -278,6 +341,11 @@ class Planner:
                                 tool="system.set_reminder",
                                 risk_level=PermissionEngine.classify("system.set_reminder").tier,
                                 result={"args": args},
+                                reasoning=(
+                                    "The request was a reminder, so the plan stores it locally with "
+                                    "the reminder tool; setting a reminder is Prepare-tier and needs "
+                                    "no external send."
+                                ),
                             )
                         ],
                     )
@@ -304,6 +372,10 @@ class Planner:
                 tool=name,
                 risk_level=permission.tier,  # static registry decides, never the LLM
                 result={"args": call.get("arguments", {})},
+                reasoning=(
+                    f"The model proposed '{name}' for step {i + 1}; its risk tier is assigned "
+                    "by the static permission registry, not by the model."
+                ),
             )
             plan.steps.append(step)
         return plan
@@ -317,4 +389,7 @@ def _step_dict(step: TaskStep) -> dict:
         "risk_level": step.risk_level.value,
         "arguments": step.result,
         "status": step.status.value,
+        # Show why before execution, not only after the audit record exists.
+        "reasoning": step.reasoning,
+        "alternatives": step.alternatives,
     }

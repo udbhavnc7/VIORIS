@@ -34,6 +34,19 @@ export function useRunCommand() {
         const blocked = Array.isArray(result.blocked_tools) ? result.blocked_tools.length : 0;
         await Promise.all([refreshCore(), refreshSystem()]);
 
+        if (result.killed) {
+          const stopped = Array.isArray(result.stopped) ? result.stopped.length : 0;
+          push({
+            title: "Emergency stop",
+            message:
+              stopped > 0
+                ? `Kill phrase matched — ${stopped} task${stopped === 1 ? "" : "s"} halted.`
+                : "Kill phrase matched — no active tasks, nothing is running.",
+            tone: "warn",
+          });
+          return { task: null, taskId: null, blocked: 0, error: null };
+        }
+
         if (task?.status === "waiting_approval") {
           push({
             title: "Plan ready — waiting on you",

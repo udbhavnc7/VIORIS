@@ -24,7 +24,7 @@ import time
 import numpy as np
 
 from packages.shared.audit import compute_chain
-from packages.shared.schemas import AuditEvent
+from packages.shared.schemas import AgentState, AuditEvent
 
 from ..commands import handle as handle_command
 from .state_machine import AgentStateMachine
@@ -49,6 +49,7 @@ class VoiceLoop:
         config,
         executor=None,
         store=None,
+        kill_listener=None,
     ) -> None:
         self.state = state_machine
         self.wake = wake
@@ -59,6 +60,7 @@ class VoiceLoop:
         self.cfg = config
         self.executor = executor
         self.store = store
+        self.kill_listener = kill_listener
         self.responses: list[tuple[str, str | None]] = []  # (transcript, reply)
         self.events: list[AuditEvent] = []
 
@@ -129,6 +131,30 @@ class VoiceLoop:
         if not transcript:
             self.state.to_idle()
             return
+
+        # Kill phrase preempts the planner entirely. This check is pure string
+        # matching, so it works even if the LLM is slow, confused, or hijacked.
+        if self.kill_listener is not None:
+            killed, reply = self.kill_listener.check_and_preempt(transcript)
+            if killed:
+                self._audit(
+                    "system",
+                    "stopped",
+                    {"trigger": "kill_phrase", "transcript": transcript},
+                )
+                self.responses.append((transcript, reply))
+                # The stop_fn landed the state machine in STOPPED; acknowledge
+                # the interrupt and return to idle so the confirmation can be
+                # spoken without tripping the hard-interrupt check. IDLE cannot
+                # jump straight to SPEAKING by design, so pass through THINKING
+                # and use the normal speech path.
+                self.state.acknowledge_stop()
+                if self.state.state == AgentState.STOPPED:
+                    self.state.to_idle()
+                if self.state.state == AgentState.IDLE:
+                    self.state.to_thinking()
+                self._speak(reply)
+                return
 
         result = handle_command(transcript)
         self._audit("user", result.action, result.detail)

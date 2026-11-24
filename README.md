@@ -45,7 +45,7 @@ For phone access, put the laptop and the phone on a [Tailscale](https://tailscal
 
 ## Status
 
-**Working v1 local preview.** The full loop runs end to end: a request is turned into a plan, every step is classified by a static permission registry (46 tools, tiers Observe / Prepare / Execute / Critical), Execute and Critical steps stop at an exact diff card for approval, approved steps run, and every outcome lands in an append-only, hash-chained audit log. The interface covers Overview, Workflows, Approvals, Activity, Memory, Connections, Remote devices, Call, and Settings.
+**Working v1 local preview.** The full loop runs end to end: a request is turned into a plan, every step is classified by a static permission registry (46 tools, tiers Observe / Prepare / Execute / Critical), Execute and Critical steps stop at an exact diff card for approval, approved steps run, and every outcome lands in an append-only, hash-chained audit log. Each plan step also records *why* it was chosen; the task drawer can explain a whole plan and the Activity screen answers plain-language "why did you do that?" questions from that record. A kill phrase ("stop everything", "vioris stop", "emergency stop", "abort all") is matched before planning on every surface — voice, gateway, and task runner — so it halts work even if the planner is confused or hijacked. The interface covers Overview, Workflows, Approvals, Activity, Memory, Connections, Remote devices, Call, and Settings.
 
 What is deliberately simulated:
 
@@ -59,7 +59,9 @@ What is deliberately simulated:
 
 - **The model never assigns risk.** A static permission registry is the sole authority on whether a tool is Observe, Prepare, Execute, or Critical. An LLM cannot talk its way past it.
 - **The frontend never executes.** It asks the authenticated gateway for work; the gateway, task runner, and permission engine decide.
-- **Every action is auditable.** Audit events are append-only and hash-chained. The Activity screen reports chain integrity rather than hiding it.
+- **Every action is auditable and explainable.** Audit events are append-only and hash-chained. Each plan step stores the reason it was chosen and the alternatives considered, so the Activity screen can answer "why did you do that?" from the same durable record instead of improvising. Older tasks without a stored reason are labelled *derived from the plan*.
+- **The kill phrase never asks the model.** "Stop everything" is plain string matching at the voice/gateway/task-runner boundary, executed before the planner. It stops every non-terminal task, purges pending approvals, and writes a `stopped` audit event even when nothing was running.
+- **The Activity screen reports chain integrity** rather than hiding it.
 - **Local-first, no paid APIs by default.** Ollama and the local services are enough to run the system; external models and apps are opt-in.
 - **Secrets stay out of the model.** Tokens are never logged, never placed in prompts, and never handed to the planner.
 
@@ -115,7 +117,7 @@ npm test                            # Node proxy/security tests
 npm run build                       # production interface build
 ```
 
-The suite covers the permission registry, approval and Critical gates, audit chain integrity, pairing/auth, memory scoping, demo-connector honesty, proactive-call gating, and the Node host's allowlist, traversal refusal, DNS-rebinding guard, CSP, and SPA fallback. `tests/test_live_driving_flow.py` is an opt-in live script and skips unless `VIORIS_LIVE_TOKEN` is set.
+The suite covers the permission registry, approval and Critical gates, audit chain integrity, explainability records and their gateway proxies, kill-phrase preemption across the shared matcher, task runner, gateway, and voice loop, pairing/auth, memory scoping, demo-connector honesty, proactive-call gating, and the Node host's allowlist, traversal refusal, DNS-rebinding guard, CSP, and SPA fallback. `tests/test_live_driving_flow.py` is an opt-in live script and skips unless `VIORIS_LIVE_TOKEN` is set.
 
 ## License
 

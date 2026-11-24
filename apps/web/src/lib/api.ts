@@ -12,6 +12,12 @@ export type TaskStatus =
   | "cancelled"
   | "stopped";
 
+export interface ReasoningAlternative {
+  tool?: string;
+  reason?: string;
+  rejected?: boolean;
+}
+
 export interface TaskStep {
   step_id: string;
   agent: string;
@@ -20,7 +26,36 @@ export interface TaskStep {
   status: TaskStatus;
   error: string | null;
   result: unknown;
+  reasoning?: string | null;
+  alternatives?: ReasoningAlternative[];
   created_at: string;
+}
+
+export interface StepReasoning {
+  step_id: string;
+  tool: string;
+  chosen_reason: string;
+  alternatives: ReasoningAlternative[];
+  risk_rationale: string;
+  user_request: string;
+  created_at: string;
+  source?: "recorded" | "derived";
+}
+
+export interface TaskExplanation {
+  task_id: string;
+  request: string;
+  status: TaskStatus;
+  explanation: string;
+  steps: StepReasoning[];
+  found: boolean;
+}
+
+export interface WhyAnswer {
+  query: string;
+  explanation: string;
+  found: boolean;
+  query_type: string;
 }
 
 export interface Task {
@@ -277,7 +312,13 @@ export const api = {
   tasks: async () => (await request<{ tasks: Task[] }>("/v1/tasks")).tasks ?? [],
   task: async (id: string) => (await request<{ task: Task }>(`/v1/tasks/${id}`)).task,
   createTask: (text: string) =>
-    request<{ task: Task; task_id: string; blocked_tools?: unknown[] }>("/v1/tasks", {
+    request<{
+      task: Task | null;
+      task_id: string | null;
+      blocked_tools?: unknown[];
+      killed?: boolean;
+      stopped?: string[];
+    }>("/v1/tasks", {
       method: "POST",
       body: { request: text, start: true, auto_run: true },
     }),
@@ -291,6 +332,17 @@ export const api = {
     request<{ task: Task }>(`/v1/tasks/${id}/cancel`, { method: "POST" }),
   retryStep: (taskId: string, stepId: string) =>
     request<{ task: Task }>(`/v1/tasks/${taskId}/retry/${stepId}`, { method: "POST" }),
+
+  explainTask: async (id: string) =>
+    (await request<{ explanation: TaskExplanation }>(`/v1/tasks/${id}/explain`)).explanation,
+  explainStep: async (taskId: string, stepId: string) =>
+    (await request<{ explanation: StepReasoning & { explanation: string } }>(
+      `/v1/tasks/${taskId}/steps/${stepId}/explain`,
+    )).explanation,
+  askWhy: (query: string) =>
+    request<WhyAnswer>("/v1/explain", { method: "POST", body: { query } }),
+  recentReasoning: async () =>
+    (await request<{ reasoning: StepReasoning[] }>("/v1/explain/recent")).reasoning ?? [],
 
   approvals: async () =>
     (await request<{ approvals: Approval[] }>("/v1/approvals")).approvals ?? [],

@@ -55,6 +55,7 @@ def build_voice_loop():
     from .config import AgentConfig
     from .executor import Executor
     from .services.audio_source import MicrophoneSource
+    from .services.kill_phrase import KillPhraseListener
     from .services.state_machine import AgentStateMachine
     from .services.stt import WhisperSTT
     from .services.tts import PiperTTS, find_piper_voice
@@ -76,7 +77,34 @@ def build_voice_loop():
     )
     store = TaskStore(cfg.db_path)
     state = AgentStateMachine()
-    return VoiceLoop(state, wake, clap, tts, stt, source, cfg, executor=Executor(), store=store)
+    kill_listener = KillPhraseListener(stop_fn=lambda: _stop_for_kill_phrase(state, store))
+    return VoiceLoop(
+        state,
+        wake,
+        clap,
+        tts,
+        stt,
+        source,
+        cfg,
+        executor=Executor(),
+        store=store,
+        kill_listener=kill_listener,
+    )
+
+
+def _stop_for_kill_phrase(state, store) -> list[str]:
+    """Hard-stop the voice loop and report the local tasks that were active.
+
+    The kill phrase runs before the planner, so this function must stay
+    trivial: set the interrupt, list non-terminal tasks, return their ids.
+    """
+    affected = [
+        task["task_id"]
+        for task in store.list_tasks(limit=1000)
+        if task.get("status") not in ("cancelled", "completed", "failed", "stopped")
+    ]
+    state.request_stop()
+    return affected
 
 
 def main(argv: list[str] | None = None) -> int:

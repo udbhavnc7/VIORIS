@@ -8,7 +8,13 @@ import {
   type ReactNode,
 } from "react";
 
-import { api, formatError, type Task, type TaskStep } from "../lib/api";
+import {
+  api,
+  formatError,
+  type Task,
+  type TaskExplanation,
+  type TaskStep,
+} from "../lib/api";
 import { relativeTime, shortId, toolInfo } from "../lib/format";
 import { useData } from "../state/store";
 import { ApprovalCard } from "./ApprovalCard";
@@ -61,6 +67,18 @@ function StepRow({ step }: { step: TaskStep }) {
           <span>{relativeTime(step.created_at)}</span>
         </div>
         {step.error ? <p className="step-error">{step.error}</p> : null}
+        {step.reasoning ? (
+          <p className="step-why">
+            <Icon name="spark" size={12} />
+            <span>{step.reasoning}</span>
+          </p>
+        ) : null}
+        {step.alternatives && step.alternatives.length > 0 ? (
+          <details className="step-result">
+            <summary>Alternatives considered</summary>
+            <pre>{pretty(step.alternatives)}</pre>
+          </details>
+        ) : null}
         {step.result ? (
           <details className="step-result">
             <summary>Exact result</summary>
@@ -77,6 +95,7 @@ export function TaskDrawerProvider({ children }: { children: ReactNode }) {
   const [task, setTask] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [explanation, setExplanation] = useState<TaskExplanation | null>(null);
   const { approvals, refreshCore } = useData();
   const { push } = useToast();
 
@@ -84,12 +103,14 @@ export function TaskDrawerProvider({ children }: { children: ReactNode }) {
     setTaskId(null);
     setTask(null);
     setError(null);
+    setExplanation(null);
   }, []);
 
   const openTask = useCallback((id: string) => {
     setTaskId(id);
     setTask(null);
     setError(null);
+    setExplanation(null);
   }, []);
 
   const load = useCallback(async (id: string) => {
@@ -99,6 +120,14 @@ export function TaskDrawerProvider({ children }: { children: ReactNode }) {
       setError(formatError(err));
     }
   }, []);
+
+  const loadExplanation = useCallback(async (id: string) => {
+    try {
+      setExplanation(await api.explainTask(id));
+    } catch (err) {
+      push({ title: "Could not explain this plan", message: formatError(err), tone: "bad" });
+    }
+  }, [push]);
 
   useEffect(() => {
     if (!taskId) return;
@@ -247,6 +276,48 @@ export function TaskDrawerProvider({ children }: { children: ReactNode }) {
                       ))}
                     </section>
                   ) : null}
+
+                  <section className="drawer-section">
+                    <h3>Why this plan?</h3>
+                    {explanation ? (
+                      <div className="why-panel">
+                        <p className="why-summary">{explanation.explanation}</p>
+                        <ol className="why-list">
+                          {explanation.steps.map((step) => (
+                            <li key={step.step_id}>
+                              <div className="why-head">
+                                <code>{step.tool}</code>
+                                {step.source === "derived" ? (
+                                  <span className="why-derived">derived from the plan</span>
+                                ) : null}
+                              </div>
+                              <p>{step.chosen_reason}</p>
+                              {step.risk_rationale ? (
+                                <p className="fine-print">{step.risk_rationale}</p>
+                              ) : null}
+                              {step.alternatives.length > 0 ? (
+                                <ul className="why-alternatives">
+                                  {step.alternatives.map((alt, index) => (
+                                    <li key={`${step.step_id}-alt-${index}`}>
+                                      {alt.tool ?? "alternative"}: {alt.reason ?? "not chosen"}
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : null}
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => void loadExplanation(task.task_id)}
+                      >
+                        <Icon name="spark" size={14} /> Explain this plan
+                      </button>
+                    )}
+                  </section>
 
                   <section className="drawer-section">
                     <h3>Steps</h3>

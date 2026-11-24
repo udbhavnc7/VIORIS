@@ -21,6 +21,12 @@ import uuid
 from pathlib import Path
 
 from packages.shared.audit import GENESIS_HASH, event_payload
+from packages.shared.explainability import (
+    ExplainabilityEngine,
+    ReasoningStore,
+    StepReasoning,
+)
+from packages.shared.explainability_handler import ExplainabilityHandler
 from packages.shared.schemas import Task, TaskStatus, TaskStep
 
 from .approvals import ApprovalStore, action_hash
@@ -66,6 +72,11 @@ class TaskManager:
         self.approvals = ApprovalStore(self.db_path)
         self.events = events or EventHub()
         self.engine = engine or TaskEngine(approval_store=self.approvals)
+        # Explainability lives beside the audit chain in the same local DB so
+        # "why did you do that?" is answered from the same durable record.
+        self.reasoning = ReasoningStore(self.db_path)
+        self.explainer = ExplainabilityEngine(self.reasoning)
+        self.why_handler = ExplainabilityHandler(self.explainer)
         self._reconcile_inflight()
 
     def _reconcile_inflight(self) -> None:
@@ -95,15 +106,45 @@ class TaskManager:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+        self.reasoning.close()
 
     # ── write path ────────────────────────────────────────────────────────
     def create_task(self, request: str, steps: list[TaskStep]) -> Task:
         task = self.engine.create_task(request, steps)
         self._persist(task)
+        for step in task.steps:
+            self._record_reasoning(task, step, request)
         self.append_audit(
             "system", "planned_step", {"request": request, "steps": len(steps)}, task.task_id
         )
         return task
+
+    def _record_reasoning(self, task: Task, step: TaskStep, request: str) -> None:
+        """Persist the planner's reasoning for a step, with a safe fallback.
+
+        Older/API-created plans may not carry a reasoning string; the fallback
+        keeps the record honest about what actually drove the decision (the
+        static registry tier) instead of inventing a story.
+        """
+        chosen = step.reasoning or (
+            f"The plan used {step.tool} for this request; its "
+            f"{step.risk_level.value}-tier risk came from the static permission registry."
+        )
+        rationale = (
+            f"{step.tool} is {step.risk_level.value}-tier in the frozen registry, "
+            "so the gate matches the action's real blast radius."
+        )
+        self.reasoning.store(
+            StepReasoning(
+                task_id=task.task_id,
+                step_id=step.step_id,
+                tool=step.tool,
+                chosen_reason=chosen,
+                alternatives=step.alternatives or [],
+                risk_rationale=rationale,
+                user_request=request,
+            )
+        )
 
     def start(self, task_id: str) -> Task:
         task = self.get(task_id)
@@ -156,6 +197,30 @@ class TaskManager:
                 self.approvals.reject(approval)
         if affected:
             self.events.publish({"type": "stopped_all", "task_ids": affected})
+        return affected
+
+    def kill_phrase(self, transcript: str) -> list[str]:
+        """LLM-independent emergency stop triggered by a kill phrase.
+
+        The kill phrase is matched before planning, so this path must never
+        depend on the planner or an approval. It reuses ``stop_all()`` (hard
+        stop, pending approvals purged) and always writes an audit record,
+        even when no task was live at the moment the phrase was heard.
+        """
+        affected = self.stop_all()
+        self.append_audit(
+            "system",
+            "stopped",
+            {
+                "emergency": True,
+                "trigger": "kill_phrase",
+                "transcript": transcript,
+                "affected": affected,
+            },
+        )
+        self.events.publish(
+            {"type": "kill_phrase", "task_ids": affected, "transcript": transcript}
+        )
         return affected
 
     def retry_step(self, task_id: str, step_id: str) -> Task:
@@ -374,6 +439,117 @@ class TaskManager:
                 problems.append(f"{event_id}: hash mismatch")
             prev = hash
         return (not problems, problems)
+
+    # ── explainability (Phase 8.4 / 10.2) ─────────────────────────────────
+    def _reasoning_records(self, task: Task) -> list[dict]:
+        """Return stored reasoning for a task, falling back to the step itself.
+
+        Tasks created before explainability was wired still have their plan on
+        disk. Rather than answer "no reasoning found", we surface the step's
+        own reasoning field when present and an honest registry-based fallback
+        otherwise. The record is never fabricated as if the planner had said it.
+        """
+        stored = {r.step_id: r for r in self.reasoning.get_by_task(task.task_id)}
+        records: list[dict] = []
+        for step in task.steps:
+            reason = stored.get(step.step_id)
+            if reason is not None:
+                records.append(
+                    {
+                        "step_id": reason.step_id,
+                        "tool": reason.tool,
+                        "chosen_reason": reason.chosen_reason,
+                        "alternatives": reason.alternatives,
+                        "risk_rationale": reason.risk_rationale,
+                        "user_request": reason.user_request,
+                        "created_at": reason.created_at,
+                        "source": "recorded",
+                    }
+                )
+                continue
+            records.append(
+                {
+                    "step_id": step.step_id,
+                    "tool": step.tool,
+                    "chosen_reason": step.reasoning
+                    or (
+                        f"This plan step used {step.tool}; its "
+                        f"{step.risk_level.value}-tier risk came from the static permission registry."
+                    ),
+                    "alternatives": step.alternatives,
+                    "risk_rationale": (
+                        f"{step.tool} is {step.risk_level.value}-tier in the frozen registry."
+                    ),
+                    "user_request": task.request,
+                    "created_at": step.created_at.isoformat(),
+                    "source": "derived",
+                }
+            )
+        return records
+
+    def explain_task(self, task_id: str) -> dict:
+        task = self.get(task_id)
+        records = self._reasoning_records(task)
+        explanation = self.explainer.explain_task(task_id)
+        if not self.reasoning.get_by_task(task_id) and records:
+            # The engine has no stored rows; render the derived records so the
+            # answer still names every step instead of claiming ignorance.
+            lines = ["Here's why I did what I did for that task:"]
+            for i, record in enumerate(records, 1):
+                lines.append(f"\nStep {i} ({record['tool']}): {record['chosen_reason']}")
+            explanation = "\n".join(lines)
+        return {
+            "task_id": task_id,
+            "request": task.request,
+            "status": task.status.value,
+            "explanation": explanation,
+            "steps": records,
+            "found": bool(records),
+        }
+
+    def explain_step(self, task_id: str, step_id: str) -> dict:
+        task = self.get(task_id)
+        record = next((r for r in self._reasoning_records(task) if r["step_id"] == step_id), None)
+        if record is None:
+            raise KeyError(f"step {step_id} not found on task {task_id}")
+        explanation = self.explainer.explain_step(task_id, step_id)
+        if record["source"] == "derived":
+            parts = [f"I used {record['tool']} because {record['chosen_reason']}."]
+            if record["risk_rationale"]:
+                parts.append(f"Risk assessment: {record['risk_rationale']}")
+            explanation = "\n".join(parts)
+        return {
+            "task_id": task_id,
+            "step_id": step_id,
+            **record,
+            "explanation": explanation,
+        }
+
+    def explain_query(self, text: str) -> dict:
+        """Answer a natural-language "why did you do that?" question."""
+        response = self.why_handler.handle(text)
+        return {
+            "query": text,
+            "explanation": response.explanation,
+            "found": response.found,
+            "query_type": response.query_type,
+        }
+
+    def recent_reasoning(self, limit: int = 20) -> list[dict]:
+        return [
+            {
+                "reasoning_id": r.reasoning_id,
+                "task_id": r.task_id,
+                "step_id": r.step_id,
+                "tool": r.tool,
+                "chosen_reason": r.chosen_reason,
+                "alternatives": r.alternatives,
+                "risk_rationale": r.risk_rationale,
+                "user_request": r.user_request,
+                "created_at": r.created_at,
+            }
+            for r in self.reasoning.recent(limit=limit)
+        ]
 
     def _persist(self, task: Task) -> None:
         with self._lock:
