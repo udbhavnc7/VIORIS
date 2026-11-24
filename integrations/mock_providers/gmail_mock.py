@@ -9,6 +9,8 @@ stayed inside its declared read-only scope.
 
 from __future__ import annotations
 
+import copy
+
 from integrations.base import ConnectorError, ExpiredSessionError, RateLimitError
 
 
@@ -20,10 +22,16 @@ class MockGmailTransport:
 
     def __init__(self, messages: list[dict] | None = None) -> None:
         self.name = "gmail"
-        #: canned messages keyed by message id (already Gmail-shaped metadata)
-        self.messages = {m["id"]: m for m in (messages or _DEFAULT_MESSAGES)}
+        #: canned messages keyed by message id (already Gmail-shaped metadata).
+        #: Deep-copied so a test that stars/labels a message cannot mutate the
+        #: module-level defaults and leak into later tests.
+        source = messages if messages is not None else _DEFAULT_MESSAGES
+        self.messages = {m["id"]: copy.deepcopy(m) for m in source}
         self.calls: list[str] = []
         self.revoked: bool = False
+        #: write-path records, so tests can prove nothing fired on a refusal
+        self.modified: list[dict] = []
+        self.sent: list[dict] = []
         self.require_scope: str | None = None  # set by authorize_uri; must be respected
         self.fail_next: str | None = None
         self._auth_scope: str = ""
@@ -82,6 +90,53 @@ class MockGmailTransport:
         except KeyError as exc:
             raise ConnectorError(f"no message {message_id}") from exc
 
+    # ── write endpoints ──────────────────────────────────────────────────────
+    def modify_message(
+        self,
+        access_token: str,
+        message_id: str,
+        *,
+        add_labels: tuple[str, ...] = (),
+        remove_labels: tuple[str, ...] = (),
+    ) -> dict:
+        self.calls.append(f"modify_message:{message_id}")
+        self._maybe_fail()
+        try:
+            message = self.messages[message_id]
+        except KeyError as exc:
+            raise ConnectorError(f"no message {message_id}") from exc
+        labels = set(message.get("labelIds", ["INBOX", "UNREAD"]))
+        labels.update(add_labels or ())
+        labels.difference_update(remove_labels or ())
+        message["labelIds"] = sorted(labels)
+        self.modified.append(
+            {
+                "message_id": message_id,
+                "add_labels": list(add_labels or ()),
+                "remove_labels": list(remove_labels or ()),
+                "label_ids": sorted(labels),
+            }
+        )
+        return {"id": message_id, "labelIds": sorted(labels)}
+
+    def send_message(
+        self,
+        access_token: str,
+        *,
+        raw: str,
+        thread_id: str | None = None,
+    ) -> dict:
+        self.calls.append("send_message")
+        self._maybe_fail()
+        message_id = f"sent_{len(self.sent) + 1}"
+        record = {
+            "message_id": message_id,
+            "thread_id": thread_id or "t0",
+            "raw": raw,
+        }
+        self.sent.append(record)
+        return {"id": message_id, "threadId": record["thread_id"], "labelIds": ["SENT"]}
+
     # ── failure injection ────────────────────────────────────────────────────
     def _maybe_fail(self) -> None:
         if self.fail_next == self.FAIL_RATE_LIMIT:
@@ -95,6 +150,7 @@ class MockGmailTransport:
 _DEFAULT_MESSAGES = [
     {
         "id": "m1",
+        "labelIds": ["INBOX", "UNREAD"],
         "payload": {
             "headers": [
                 {"name": "From", "value": "Boss <boss@example.com>"},
@@ -105,6 +161,7 @@ _DEFAULT_MESSAGES = [
     },
     {
         "id": "m2",
+        "labelIds": ["INBOX", "UNREAD"],
         "payload": {
             "headers": [
                 {"name": "From", "value": "Newsletter <news@example.com>"},
@@ -115,6 +172,7 @@ _DEFAULT_MESSAGES = [
     },
     {
         "id": "m3",
+        "labelIds": ["INBOX", "UNREAD"],
         "payload": {
             "headers": [
                 {"name": "From", "value": "Recruiter <recruiter@example.com>"},

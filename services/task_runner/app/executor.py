@@ -78,6 +78,20 @@ _CONNECTOR_ROUTES: dict[str, _Route] = {
         "gmail", "GET", "/digest", query_keys=("hours", "max_results", "account")
     ),
     "gmail.digest_status": _Route("gmail", "GET", "/accounts"),
+    "gmail.react": _Route(
+        "gmail",
+        "POST",
+        "/react",
+        body_keys=("message_id", "reaction", "label", "account"),
+        approval=True,
+    ),
+    "gmail.send_reply": _Route(
+        "gmail",
+        "POST",
+        "/reply",
+        body_keys=("thread_id", "message_id", "to", "subject", "body", "account"),
+        approval=True,
+    ),
     # WhatsApp
     "whatsapp.read_digest": _Route(
         "whatsapp", "GET", "/digest", query_keys=("hours", "max_messages", "session_ref")

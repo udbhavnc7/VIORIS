@@ -118,7 +118,9 @@ class AbstractConnector(abc.ABC):
         identity = self._identity_from_tokens(raw)
         self._vault.save(self.service, identity, raw, scopes=self._scopes.all())
         self._audit(identity, "connected", {"connector": self.service, "scopes": self._scopes.all()})
-        return {"connector": self.service, "account": identity, "scopes": self._scopes.read}
+        # Report every scope actually granted, not just the read half. A
+        # read-only connector's write list is empty, so its summary is unchanged.
+        return {"connector": self.service, "account": identity, "scopes": self._scopes.all()}
 
     def refresh(self, identity: str) -> None:
         """Transparent multi-session refresh. One attempt via the refresh

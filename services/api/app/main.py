@@ -90,8 +90,9 @@ async def process_voice_command(req: VoiceCommandRequest):
         tool_results=[],
     )
 
+    composed = result.composed_response
     return VoiceCommandResponse(
-        response=result.composed_response if result.composed_response else "Done.",
+        response=composed.spoken if composed and composed.spoken else "Done.",
         decomposed=[{
             "text": i.text,
             "targets": i.targets,
@@ -99,8 +100,9 @@ async def process_voice_command(req: VoiceCommandRequest):
             "negated": i.negated,
         } for i in result.sub_intents],
         actionables=[{
-            "item": a.item,
-            "signal": a.signal,
+            "source": a.source,
+            "sender": a.sender,
+            "summary": a.summary,
             "action": a.suggested_action,
         } for a in result.actionables],
         trust_level=result.trust_level.value,
@@ -171,7 +173,20 @@ async def email_react(email_id: str, reaction: str, sender: str = "unknown"):
     valid, err = react.validate()
     if not valid:
         raise HTTPException(status_code=400, detail=err)
-    return {"email_id": email_id, "reaction": reaction, "status": "sent"}
+    # This API process has no Gmail transport wired in. Say exactly that rather
+    # than fabricating a sent reaction — real reactions go through the Gmail
+    # connector's approval-gated /react endpoint.
+    return {
+        "email_id": email_id,
+        "reaction": reaction,
+        "status": "staged",
+        "delivered": False,
+        "notice": (
+            "No Gmail write transport is connected to this API process, so "
+            "nothing was sent. Use the Gmail connector /react endpoint for a "
+            "real, approved reaction."
+        ),
+    }
 
 
 @app.get("/api/health")
@@ -209,13 +224,27 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str, device_type: 
             elif msg_type == "approve":
                 action_id = msg.get("payload", {}).get("action_id", "")
                 approved = msg.get("payload", {}).get("approved", False)
-                if approved:
-                    approval_manager.approve(action_id)
-                else:
-                    approval_manager.reject(action_id)
+                record = _approvals.get(action_id)
+                if record is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "approval_result",
+                        "payload": {
+                            "action_id": action_id,
+                            "approved": False,
+                            "error": "unknown action",
+                        },
+                        "timestamp": time.time(),
+                    }))
+                    continue
+                record["status"] = "approved" if approved else "rejected"
+                record["decided_at"] = datetime.utcnow().isoformat()
                 await websocket.send_text(json.dumps({
                     "type": "approval_result",
-                    "payload": {"action_id": action_id, "approved": approved},
+                    "payload": {
+                        "action_id": action_id,
+                        "approved": approved,
+                        "status": record["status"],
+                    },
                     "timestamp": time.time(),
                 }))
             elif msg_type == "ping":

@@ -213,6 +213,18 @@ class TestVoiceEndpoint:
         response = client.post("/api/voice", json={"text": ""})
         assert response.status_code == 200
 
+    def test_response_is_spoken_text_not_an_object(self):
+        """Regression: ComposedResponse must be unwrapped to its spoken text."""
+        response = client.post("/api/voice", json={"text": "check email"})
+        assert response.status_code == 200
+        assert isinstance(response.json()["response"], str)
+
+    def test_actionables_use_the_real_schema(self):
+        response = client.post("/api/voice", json={"text": "check email"})
+        assert response.status_code == 200
+        for item in response.json()["actionables"]:
+            assert {"source", "sender", "summary", "action"} <= set(item)
+
 
 class TestApprovalEndpoint:
     def _create_approval(self, action_id: str):
@@ -285,6 +297,15 @@ class TestReactEndpoint:
         response = client.post("/api/react?email_id=e1&reaction=%F0%9F%91%8D&sender=Disha")
         assert response.status_code == 200
         assert response.json()["reaction"] == "👍"
+
+    def test_reaction_does_not_claim_delivery_without_a_transport(self):
+        """The API process has no Gmail transport; it must say so honestly."""
+        response = client.post("/api/react?email_id=e1&reaction=%F0%9F%91%8D&sender=Disha")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["delivered"] is False
+        assert body["status"] == "staged"
+        assert "nothing was sent" in body["notice"].lower()
 
     def test_invalid_reaction(self):
         response = client.post("/api/react?email_id=e1&reaction=fire&sender=Disha")

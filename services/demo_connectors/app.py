@@ -108,6 +108,21 @@ def gmail_digest(hours: int = 24, max_results: int = 5, account: str | None = No
     return {"ok": True, "items": items[:max_results], "unread": len(items), **_DEMO}
 
 
+@app.post("/gmail/react")
+def gmail_react(payload: dict) -> dict:
+    return _fail(
+        "Demo mode: no Gmail account is connected, so nothing was starred, "
+        "labelled, or marked read."
+    )
+
+
+@app.post("/gmail/reply")
+def gmail_reply(payload: dict) -> dict:
+    return _fail(
+        "Demo mode: no Gmail account is connected, so no reply was sent."
+    )
+
+
 # ─── Calendar ───────────────────────────────────────────────────────────────
 
 

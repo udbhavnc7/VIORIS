@@ -26,6 +26,7 @@ def _make_client(transport: MockGmailTransport) -> TestClient:
     # isolate the token vault + connector in a temp dir; swap transport for mock
     gmail_api._vault = None
     gmail_api._connector = None
+    gmail_api._write_connector = None
     os.environ["VIORUS_DATA_DIR"] = tempfile.mkdtemp(prefix="vioris-gmail-test-")
 
     # Other test modules (e.g. test_task_stop_all) freeze the registry and
@@ -39,7 +40,13 @@ def _make_client(transport: MockGmailTransport) -> TestClient:
 
         return GmailConnector(gmail_api.get_vault(), transport=transport)
 
+    def _patched_get_write_connector():
+        from integrations.gmail.write_connector import GmailWriteConnector
+
+        return GmailWriteConnector(gmail_api.get_vault(), transport=transport)
+
     gmail_api.get_connector = _patched_get_connector  # type: ignore[assignment]
+    gmail_api.get_write_connector = _patched_get_write_connector  # type: ignore[assignment]
     client = TestClient(gmail_api.app)
     client.__enter__()
     return client
@@ -139,5 +146,226 @@ def test_health_reports_registration() -> None:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["gmail_read_unread_observed"] is True
+        assert resp.json()["gmail_react_execute"] is True
+        assert resp.json()["gmail_send_reply_execute"] is True
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ── write path (Execute-tier, approval-ledger-gated) ─────────────────────────
+
+
+def _connect_write(client: TestClient) -> dict:
+    """Opt in to write scopes, then complete the mock OAuth exchange."""
+    start = client.post("/connect/start", json={"include_write": True})
+    assert start.status_code == 200
+    state = start.json()["state"]
+    done = client.post(f"/connect/complete?state={state}&code=writecode")
+    assert done.status_code == 200
+    return done.json()
+
+
+def _approve(tool: str, task_id: str, step_id: str, key: str, args: dict) -> None:
+    """Write an approved record into the ledger the verifier reads."""
+    from pathlib import Path
+
+    from services.task_runner.app.approvals import ApprovalStore
+
+    store = ApprovalStore(Path(os.environ["VIORUS_DATA_DIR"]) / "task_runner.db")
+    approval = store.create(task_id, step_id, key, tool, args)
+    store.approve(approval)
+
+
+def test_connect_opt_in_write_reports_write_scopes() -> None:
+    transport = MockGmailTransport()
+    client = _make_client(transport)
+    try:
+        summary = _connect_write(client)
+        assert "https://www.googleapis.com/auth/gmail.modify" in summary["scopes"]
+        assert "https://www.googleapis.com/auth/gmail.send" in summary["scopes"]
+
+        accounts = client.get("/accounts").json()
+        assert "https://www.googleapis.com/auth/gmail.send" in accounts[0]["scopes"]
+        assert "replies" in accounts[0]["permission_explanation"].lower()
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_react_requires_idempotency_key() -> None:
+    transport = MockGmailTransport()
+    client = _make_client(transport)
+    try:
+        _connect_write(client)
+        resp = client.post("/react", json={"message_id": "m1"})
+        assert resp.status_code == 422
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_react_blocked_when_tool_unregistered() -> None:
+    transport = MockGmailTransport()
+    client = _make_client(transport)
+    try:
+        _connect_write(client)
+        PermissionEngine._registry.pop("gmail.react", None)
+        resp = client.post(
+            "/react",
+            json={"message_id": "m1", "idempotency_key": "k-x"},
+        )
+        assert resp.status_code == 403
+        assert transport.modified == []  # nothing touched the mailbox
+
+        from packages.shared.schemas import ToolRegistration
+
+        PermissionEngine.register(
+            ToolRegistration(
+                tool_name="gmail.react",
+                tier=RiskTier.EXECUTE,
+                confirmation_required=True,
+                description="restored",
+                diff_card_fields=["message_id", "reaction", "label"],
+            )
+        )
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_react_refused_without_approved_ledger() -> None:
+    transport = MockGmailTransport()
+    client = _make_client(transport)
+    try:
+        _connect_write(client)
+        resp = client.post(
+            "/react",
+            json={
+                "message_id": "m1",
+                "reaction": "acknowledge",
+                "idempotency_key": "k-react-y",
+                "task_id": "task-y",
+                "step_id": "step-y",
+            },
+        )
+        assert resp.status_code == 403
+        assert "no approved approval" in resp.json()["detail"]
+        assert transport.modified == []
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_react_fires_with_approved_ledger_and_is_idempotent() -> None:
+    transport = MockGmailTransport()
+    client = _make_client(transport)
+    try:
+        _connect_write(client)
+        _approve(
+            "gmail.react",
+            "task-react",
+            "step-react",
+            "k-react-live",
+            {"message_id": "m1", "reaction": "acknowledge"},
+        )
+        payload = {
+            "message_id": "m1",
+            "reaction": "acknowledge",
+            "idempotency_key": "k-react-live",
+            "task_id": "task-react",
+            "step_id": "step-react",
+        }
+        first = client.post("/react", json=payload)
+        assert first.status_code == 200
+        body = first.json()
+        assert body["replay"] is False
+        assert body["added_labels"] == ["STARRED"]
+        assert body["removed_labels"] == ["UNREAD"]
+        assert len(transport.modified) == 1
+
+        second = client.post("/react", json=payload)
+        assert second.status_code == 200
+        assert second.json()["replay"] is True
+        assert len(transport.modified) == 1  # a retry never double-applies
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_reply_requires_idempotency_key() -> None:
+    transport = MockGmailTransport()
+    client = _make_client(transport)
+    try:
+        _connect_write(client)
+        resp = client.post(
+            "/reply",
+            json={
+                "thread_id": "t1",
+                "to": "boss@example.com",
+                "subject": "Re: Interview",
+                "body": "Tuesday works.",
+            },
+        )
+        assert resp.status_code == 422
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_reply_refused_without_approved_ledger() -> None:
+    transport = MockGmailTransport()
+    client = _make_client(transport)
+    try:
+        _connect_write(client)
+        resp = client.post(
+            "/reply",
+            json={
+                "thread_id": "t1",
+                "to": "boss@example.com",
+                "subject": "Re: Interview",
+                "body": "Tuesday works.",
+                "idempotency_key": "k-reply-y",
+                "task_id": "task-y",
+                "step_id": "step-y",
+            },
+        )
+        assert resp.status_code == 403
+        assert transport.sent == []
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_reply_fires_with_approved_ledger_and_is_idempotent() -> None:
+    transport = MockGmailTransport()
+    client = _make_client(transport)
+    try:
+        _connect_write(client)
+        _approve(
+            "gmail.send_reply",
+            "task-reply",
+            "step-reply",
+            "k-reply-live",
+            {
+                "thread_id": "t1",
+                "to": "boss@example.com",
+                "subject": "Re: Interview",
+                "body": "Tuesday works.",
+            },
+        )
+        payload = {
+            "thread_id": "t1",
+            "to": "boss@example.com",
+            "subject": "Re: Interview",
+            "body": "Tuesday works.",
+            "idempotency_key": "k-reply-live",
+            "task_id": "task-reply",
+            "step_id": "step-reply",
+        }
+        first = client.post("/reply", json=payload)
+        assert first.status_code == 200
+        body = first.json()
+        assert body["replay"] is False
+        assert body["message_id"] == "sent_1"
+        assert len(transport.sent) == 1
+
+        second = client.post("/reply", json=payload)
+        assert second.status_code == 200
+        assert second.json()["replay"] is True
+        assert second.json()["message_id"] == body["message_id"]
+        assert len(transport.sent) == 1
     finally:
         client.__exit__(None, None, None)

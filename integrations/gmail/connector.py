@@ -22,6 +22,7 @@ from typing import Protocol
 from integrations.base import (
     AbstractConnector,
     ConnectorError,
+    ExpiredSessionError,
     OAuthScopes,
     RateLimitError,
 )
@@ -217,6 +218,62 @@ class HttpxGmailTransport:
         )
         if resp.status_code == 429:
             raise RateLimitError("get_metadata: 429")
+        resp.raise_for_status()
+        return resp.json()
+
+    # ── write endpoints (used only by GmailWriteConnector) ──────────────────
+    def modify_message(
+        self,
+        access_token: str,
+        message_id: str,
+        *,
+        add_labels: tuple[str, ...] = (),
+        remove_labels: tuple[str, ...] = (),
+    ) -> dict:
+        """Apply label changes to one message (star / mark read / label)."""
+        resp = self._httpx.post(
+            f"{_GMAIL_API}/messages/{message_id}/modify",
+            json={
+                "addLabelIds": list(add_labels),
+                "removeLabelIds": list(remove_labels),
+            },
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            raise RateLimitError("modify_message: 429")
+        if resp.status_code == 401:
+            raise ExpiredSessionError("modify_message: access token rejected")
+        if resp.status_code == 403:
+            raise ConnectorError(
+                "modify_message: write scope missing or access denied"
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    def send_message(
+        self,
+        access_token: str,
+        *,
+        raw: str,
+        thread_id: str | None = None,
+    ) -> dict:
+        """Send one RFC822 message (base64url `raw`) in an existing thread."""
+        payload: dict = {"raw": raw}
+        if thread_id:
+            payload["threadId"] = thread_id
+        resp = self._httpx.post(
+            f"{_GMAIL_API}/messages/send",
+            json=payload,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            raise RateLimitError("send_message: 429")
+        if resp.status_code == 401:
+            raise ExpiredSessionError("send_message: access token rejected")
+        if resp.status_code == 403:
+            raise ConnectorError("send_message: send scope missing or access denied")
         resp.raise_for_status()
         return resp.json()
 

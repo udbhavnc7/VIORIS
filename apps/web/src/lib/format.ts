@@ -38,6 +38,8 @@ export const TOOL_INFO: Record<string, ToolInfo> = {
   "system.stop": { label: "Stop everything", blurb: "Halts every non-terminal task.", service: "system" },
   "system.register_payment": { label: "Register a payment", blurb: "Payment registration is locked in this build.", service: "system" },
   "gmail.read_unread": { label: "Read unread mail", blurb: "Fetches unread messages from Gmail.", service: "gmail" },
+  "gmail.react": { label: "React to an email", blurb: "Stars, labels, or marks one email read after approval.", service: "gmail" },
+  "gmail.send_reply": { label: "Reply to an email", blurb: "Sends an exact reply after approval.", service: "gmail" },
   "calendar.read_upcoming": { label: "Read the calendar", blurb: "Lists upcoming events.", service: "calendar" },
   "whatsapp.read_digest": { label: "Read WhatsApp digest", blurb: "Summarizes recent messages.", service: "whatsapp" },
   "whatsapp.send_message": { label: "Send WhatsApp message", blurb: "Sends once you approve the exact text.", service: "whatsapp" },

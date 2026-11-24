@@ -64,6 +64,56 @@ TOOL_PARAMETERS: dict[str, dict] = {
         "properties": {},
         "additionalProperties": False,
     },
+    "gmail.react": {
+        "type": "object",
+        "properties": {
+            "message_id": {
+                "type": "string",
+                "description": "exact Gmail message id shown in the digest",
+            },
+            "reaction": {
+                "type": "string",
+                "enum": [
+                    "acknowledge",
+                    "star",
+                    "unstar",
+                    "mark_read",
+                    "mark_unread",
+                    "label",
+                ],
+                "description": "acknowledge = star + mark read (default)",
+            },
+            "label": {
+                "type": "string",
+                "description": "Gmail label id, required only when reaction is 'label'",
+            },
+        },
+        "required": ["message_id"],
+        "additionalProperties": False,
+    },
+    "gmail.send_reply": {
+        "type": "object",
+        "properties": {
+            "thread_id": {
+                "type": "string",
+                "description": "thread id of the email being replied to (shown on the diff card)",
+            },
+            "to": {
+                "type": "string",
+                "description": "exact recipient address (shown on the diff card)",
+            },
+            "subject": {
+                "type": "string",
+                "description": "exact subject line (shown on the diff card)",
+            },
+            "body": {
+                "type": "string",
+                "description": "exact reply text to send (shown on the diff card)",
+            },
+        },
+        "required": ["thread_id", "to", "subject", "body"],
+        "additionalProperties": False,
+    },
     "whatsapp.read_digest": {
         "type": "object",
         "properties": {

@@ -136,8 +136,13 @@ class DesktopAgent:
             if agent_tasks:
                 agent_results = await self.orchestrator.execute_parallel(agent_tasks)
 
-            # 5. Compose response
-            response = result.composed_response or self.responder.adapt_response("Done.")
+            # 5. Compose response (ComposedResponse carries the spoken text)
+            composed = result.composed_response
+            response = (
+                composed.spoken
+                if composed and composed.spoken
+                else self.responder.adapt_response("Done.")
+            )
 
             # 6. Record pattern
             self.patterns.record(utterance, response)
@@ -148,7 +153,15 @@ class DesktopAgent:
                 "utterance": utterance,
                 "response": response,
                 "sub_intents": [{"text": si.text, "type": si.intent_type} for si in result.sub_intents],
-                "actionables": [{"item": a.item, "action": a.suggested_action} for a in result.actionables],
+                "actionables": [
+                    {
+                        "source": a.source,
+                        "sender": a.sender,
+                        "summary": a.summary,
+                        "action": a.suggested_action,
+                    }
+                    for a in result.actionables
+                ],
                 "contacts_resolved": resolved_contacts,
                 "agent_results": [r.to_dict() for r in agent_results],
                 "trust_level": result.trust_level.value,

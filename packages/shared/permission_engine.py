@@ -450,6 +450,29 @@ _PHASE6_CONNECTOR_TOOLS = [
         confirmation_required=False,
         description="Report which Gmail account is connected and its read scope",
     ),
+    # Gmail has no native thumbs-up reaction. "React" is deliberately its own
+    # tool, separate from reply: it stars/labels/marks one message read. That is
+    # externally visible and therefore EXECUTE under this repo's tier table
+    # (Prepare means "nothing external happens"), even though the roadmap
+    # floated Prepare as a possibility. It gets its own diff card so the user
+    # approves the exact message and label change.
+    ToolRegistration(
+        tool_name="gmail.react",
+        tier=RiskTier.EXECUTE,
+        confirmation_required=True,
+        description="Apply a lightweight, reversible reaction to one email (star, label, mark read) — never a reply",
+        diff_card_fields=["message_id", "reaction", "label"],
+    ),
+    # Sending a reply is irreversible once delivered, so this is classified
+    # EXECUTE deliberately (roadmap 10l): same tier as whatsapp.send_message.
+    # Critical stays reserved for money, deletion, credentials, and publishing.
+    ToolRegistration(
+        tool_name="gmail.send_reply",
+        tier=RiskTier.EXECUTE,
+        confirmation_required=True,
+        description="Send an email reply in an existing thread",
+        diff_card_fields=["thread_id", "to", "subject", "body"],
+    ),
     ToolRegistration(
         tool_name="whatsapp.read_digest",
         tier=RiskTier.OBSERVE,

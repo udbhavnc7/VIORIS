@@ -196,6 +196,60 @@ class TestExecuteWrites:
             },
         )
 
+    def test_gmail_react_forwards_approval_triple(self, recording):
+        task = _task()
+        step = _step(
+            "gmail.react",
+            {"message_id": "m1", "reaction": "acknowledge", "label": "Label_1"},
+            task,
+        )
+        from services.task_runner.app.executor import make_executor
+
+        make_executor()(step, task=task)
+        _assert_post(
+            recording,
+            "http://127.0.0.1:8445",
+            "/react",
+            {
+                "message_id": "m1",
+                "reaction": "acknowledge",
+                "label": "Label_1",
+                "idempotency_key": step.idempotency_key,
+                "task_id": "task_x",
+                "step_id": step.step_id,
+            },
+        )
+
+    def test_gmail_send_reply_forwards_approval_triple(self, recording):
+        task = _task()
+        step = _step(
+            "gmail.send_reply",
+            {
+                "thread_id": "t1",
+                "to": "boss@example.com",
+                "subject": "Re: Interview",
+                "body": "Tuesday works.",
+            },
+            task,
+        )
+        from services.task_runner.app.executor import make_executor
+
+        make_executor()(step, task=task)
+        _assert_post(
+            recording,
+            "http://127.0.0.1:8445",
+            "/reply",
+            {
+                "thread_id": "t1",
+                "to": "boss@example.com",
+                "subject": "Re: Interview",
+                "body": "Tuesday works.",
+                "idempotency_key": step.idempotency_key,
+                "task_id": "task_x",
+                "step_id": step.step_id,
+            },
+        )
+
     def test_telephony_start_call_forwards_approval_triple(self, recording):
         task = _task()
         step = _step("telephony.start_call", {"recipient": "doc"}, task)
