@@ -70,6 +70,7 @@ Current state, in short:
 - Contacts and people memories carry a `relationship` field. `Contact.matches()` normalises "my wife"/"the spouse" (with synonym groups) at 0.9 — above name substrings (0.8), below explicit aliases (0.95). `priority` now round-trips through save/load, and "tell my wife …" resolves to the right contact without an alias.
 - The permission engine has a call-session trust envelope (10k): the pipeline registers `dialogue.trust` when a call starts and clears it on end; `PermissionEngine.classify()` returns `verified_call_session` when Execute actions can proceed in a voiceprint-verified session. Critical tools still report `requires_second_factor=True` and are re-confirmed per action.
 - 10b bidirectional call audio (Phase 8.5): phone → gateway WS `call_audio` (base64 PCM16), gateway → phone `voice_response` + `tts` (base64 PCM16) via Piper (`packages/shared/tts.py`), gateway → planner via `packages/shared/stt.py` (WhisperSTT, moved to packages/shared, re-exported by apps/desktop_agent).
+- `MigrationRunner` (Phase 9.2) executes migrations through asyncpg against Postgres (`VIORIS_DB_URL`), with `run_pending()` applying all pending versions; the in-memory stub path remains for tests without a DB.
 
 Do not add a new capability without going through the permission registry, audit events, and tests. When in doubt about ordering, follow `docs/05-roadmap-and-prompts.md`; the remaining work is incremental capability depth, not new phases.
 
