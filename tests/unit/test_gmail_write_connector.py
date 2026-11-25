@@ -82,6 +82,26 @@ def test_react_and_reply_are_execute_tier() -> None:
 # ── reactions ────────────────────────────────────────────────────────────────
 
 
+def test_react_refuses_a_read_only_connection(
+    gmail_write: GmailWriteConnector, mock: MockGmailTransport, vault: TokenVault
+) -> None:
+    vault.save(
+        "gmail",
+        "readonly@example.com",
+        {"access_token": "at", "account_id": "readonly@example.com"},
+        scopes=[SCOPE_READONLY],
+    )
+    with pytest.raises(ConnectorError, match="write scope"):
+        gmail_write.react(
+            "readonly@example.com",
+            message_id="m1",
+            reaction="acknowledge",
+            idempotency_key="k-readonly",
+            approval_verifier=lambda: True,
+        )
+    assert mock.modified == []
+
+
 def test_react_refused_without_approval(
     gmail_write: GmailWriteConnector, mock: MockGmailTransport
 ) -> None:
