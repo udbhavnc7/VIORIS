@@ -55,6 +55,7 @@ What is deliberately simulated:
 - **The computer agent is local-only.** Screen mirroring and remote input work over loopback/Tailscale; they are not exposed publicly.
 - **No server-initiated phone calls.** The phone is a command surface, not an outbound autodialer. Proactive rings open a full-screen in-app call on the paired phone over the existing WebSocket; answering pulls the digest from the same gateway session. Replies are typed for now (no audio stream yet), nothing sends without an explicit tap, and every action still goes through approval.
 - **Voice is text-first for now.** The conversation surface and speech-friendly copy are in place; local Whisper / Piper / openWakeWord are wired as an optional path, not a requirement.
+- **Contacts understand relationships.** Say "tell my wife I'll be late" or "tell the spouse to book a table" and Vioris resolves the right person from the `relationship` field — no alias needed. Relationship references score above a bare name fragment but below an explicit alias. People memories can store the same field through the memory API or CLI.
 
 ## Why it is built this way
 

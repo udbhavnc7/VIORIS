@@ -170,6 +170,7 @@ class Memory(BaseModel):
     category: MemoryCategory
     content: str
     source: str  # where this fact came from (e.g. 'user said on 2026-08-01', 'note:foo.md')
+    relationship: str = ""  # people memories: spouse, manager, sibling, etc.
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     user_opted_in: bool = False  # required True before any sensitive write succeeds
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

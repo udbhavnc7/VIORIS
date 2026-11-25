@@ -42,6 +42,46 @@ class TestContact:
         assert d["name"] == "Disha"
         assert d["phone"] == "123"
         assert "Di" in d["aliases"]
+        assert d["priority"] == 0
+
+
+class TestRelationshipMatching:
+    def test_possessive_phrase_matches_exact_relationship(self):
+        c = Contact(name="Disha", relationship="wife")
+        assert c.matches("my wife") == 0.9
+        assert c.matches("the wife") == 0.9
+        assert c.matches("WIFE") == 0.9
+
+    def test_relationship_synonyms_resolve(self):
+        spouse = Contact(name="Disha", relationship="spouse")
+        wife = Contact(name="Meera", relationship="wife")
+        assert spouse.matches("my wife") == 0.9
+        assert wife.matches("the spouse") == 0.9
+        assert wife.matches("my partner") == 0.9
+
+    def test_relationship_is_between_alias_and_name_substring(self):
+        c = Contact(name="Disha", aliases=["Di"], relationship="friend")
+        assert c.matches("Di") == 0.95
+        assert c.matches("friend") == 0.9
+        assert c.matches("dish") == 0.8
+
+    def test_relationship_phrase_partial_scores_lower(self):
+        c = Contact(name="Riya", relationship="best friend")
+        assert c.matches("my best friend") == 0.9
+        assert c.matches("friend") == 0.85
+
+    def test_no_relationship_does_not_match_relationship_words(self):
+        c = Contact(name="Disha")
+        assert c.matches("my wife") == 0.0
+
+    def test_book_resolves_relationship_to_channels(self):
+        book = ContactBook()
+        book.add(Contact(name="Disha", phone="123", email="d@test.com", relationship="wife"))
+        result = book.resolve_target("my wife")
+        assert result["resolved"] is True
+        assert result["name"] == "Disha"
+        assert result["relationship"] == "wife"
+        assert result["channels"]["phone"] == "123"
 
 
 class TestContactBook:
@@ -96,13 +136,20 @@ class TestContactBook:
 
         try:
             book = ContactBook()
-            book.add(Contact(name="Disha", phone="123", email="d@test.com", aliases=["Di"]))
+            book.add(Contact(
+                name="Disha", phone="123", email="d@test.com", aliases=["Di"],
+                relationship="wife", priority=7,
+            ))
             book.save(path)
 
             book2 = ContactBook()
             book2.load(path)
             assert book2.count() == 1
-            assert book2.best_match("Disha").phone == "123"
+            loaded = book2.best_match("Disha")
+            assert loaded.phone == "123"
+            assert loaded.relationship == "wife"
+            assert loaded.priority == 7
+            assert book2.best_match("my wife") is loaded
         finally:
             os.unlink(path)
 

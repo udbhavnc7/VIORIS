@@ -32,7 +32,7 @@ from .call_experience import (
     RingSource,
 )
 from .call_triggers import CallTriggerStore, TriggerMatch
-from .contacts import Contact, ContactBook
+from .contacts import Contact, ContactBook, relationship_phrases
 from .dialogue import DialogueOrchestrator, SplitCommand
 from .email_connector import GmailConnector
 
@@ -944,16 +944,17 @@ class ProactiveCallPipeline:
 
     @staticmethod
     def _message_for_contact(text: str, contact: Contact) -> Optional[str]:
-        """Pull the message body that follows a contact name."""
+        """Pull the message body that follows a name, alias or relationship."""
         low = text.lower()
-        token = contact.name
-        idx = low.find(token.lower())
-        if idx == -1:
-            for alias in contact.aliases:
-                idx = low.find(alias.lower())
-                if idx != -1:
-                    token = alias
-                    break
+        tokens = [contact.name, *contact.aliases, *relationship_phrases(contact.relationship)]
+        idx, token = -1, ""
+        for candidate in tokens:
+            if not candidate:
+                continue
+            found = low.find(candidate.lower())
+            if found != -1:
+                idx, token = found, candidate
+                break
         if idx == -1:
             return None
         rest = text[idx + len(token):].strip(" ,.")
@@ -977,6 +978,13 @@ class ProactiveCallPipeline:
                 after = text.split(prefix, 1)[1]
                 words = after.split()
                 if words:
+                    # "my wife" / "the spouse" are valid relationship targets,
+                    # even though "my"/"the" are otherwise stop words.
+                    first = words[0].strip(",.!?").lower()
+                    if first in ("my", "our", "the", "their", "his", "her") and len(words) > 1:
+                        second = words[1].strip(",.!?")
+                        if second.lower() not in stop_words and "'" not in second:
+                            return f"{words[0].capitalize()} {second.capitalize()}"
                     # Take leading name words, stopping at the first verb/pronoun
                     # so "tell Disha I'll be late" resolves to "Disha", not
                     # "Disha I'll Be".

@@ -1,10 +1,62 @@
-"""Contact Resolution — maps names/aliases to phone, email, address."""
+"""Contact Resolution — maps names/aliases/relationships to phone, email, address."""
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+# Spoken relationship references are normalised before matching, so "my wife",
+# "the spouse" and "wife" all resolve to the same canonical relationship.
+_RELATIONSHIP_PREFIXES = ("my", "our", "the", "their", "his", "her")
+# Canonical form is the first entry of each group (stable across processes).
+_RELATIONSHIP_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("spouse", "wife", "husband", "partner"),
+    ("manager", "boss", "supervisor"),
+    ("parent", "mother", "father", "mom", "dad"),
+    ("sibling", "brother", "sister"),
+    ("child", "son", "daughter"),
+)
+_RELATIONSHIP_CANONICAL = {
+    word: group[0]
+    for group in _RELATIONSHIP_GROUPS
+    for word in group
+}
+
+
+def normalise_relationship(value: str) -> str:
+    """Strip determiners/possessives and canonicalise a relationship phrase."""
+    text = re.sub(r"[^a-z\s-]", " ", value.lower().strip())
+    words = text.split()
+    while words and words[0] in _RELATIONSHIP_PREFIXES:
+        words.pop(0)
+    phrase = " ".join(words)
+    return " ".join(_RELATIONSHIP_CANONICAL.get(w, w) for w in phrase.split())
+
+
+def relationship_phrases(value: str) -> list[str]:
+    """Surface forms of a relationship to look for in an utterance.
+
+    Longest first, so "my wife" wins over "wife" when extracting a message body.
+    """
+    raw = value.lower().strip()
+    if not raw:
+        return []
+    forms = {raw}
+    canonical = normalise_relationship(raw)
+    if canonical:
+        forms.add(canonical)
+        for word in canonical.split():
+            for group in _RELATIONSHIP_GROUPS:
+                if word in group:
+                    forms.update(group)
+    phrases = {
+        form
+        for phrase in forms
+        for form in (phrase, *(f"{prefix} {phrase}" for prefix in _RELATIONSHIP_PREFIXES))
+    }
+    return sorted(phrases, key=lambda p: (-len(p), p))
 
 
 @dataclass
@@ -21,12 +73,27 @@ class Contact:
         q = query.lower().strip()
         if q == self.name.lower():
             return 1.0
-        if q in [a.lower() for a in self.aliases]:
+        aliases = [a.lower().strip() for a in self.aliases]
+        if q in aliases:
             return 0.95
+        # A relationship reference ("my wife", "the spouse") is specific, but
+        # deliberately weaker than an explicit alias and stronger than a bare
+        # substring of a name.
+        if self.relationship:
+            rel = normalise_relationship(self.relationship)
+            rel_query = normalise_relationship(q)
+            if rel and rel_query:
+                if rel == rel_query:
+                    return 0.9
+                rel_words, query_words = set(rel.split()), set(rel_query.split())
+                if rel_words & query_words and (
+                    rel_words <= query_words or query_words <= rel_words
+                ):
+                    return 0.85
         if q in self.name.lower():
             return 0.8
-        for alias in self.aliases:
-            if q in alias.lower():
+        for alias in aliases:
+            if q in alias:
                 return 0.7
         return 0.0
 
@@ -38,6 +105,7 @@ class Contact:
             "address": self.address,
             "aliases": self.aliases,
             "relationship": self.relationship,
+            "priority": self.priority,
         }
 
 
@@ -114,6 +182,7 @@ class ContactBook:
                 address=d.get("address", ""),
                 aliases=d.get("aliases", []),
                 relationship=d.get("relationship", ""),
+                priority=int(d.get("priority", 0)),
             ))
 
 

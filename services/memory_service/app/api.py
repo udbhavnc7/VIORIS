@@ -36,6 +36,7 @@ class MemoryCreateRequest(BaseModel):
     source: str
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     user_opted_in: bool = False  # must be True for sensitive-category writes
+    relationship: str = ""  # e.g. spouse, manager — used for contact resolution
 
 
 class MemoryCorrectRequest(BaseModel):
@@ -54,7 +55,8 @@ def create_memory(req: MemoryCreateRequest) -> dict:
     if req.category == MemoryCategory.SENSITIVE and not req.user_opted_in:
         raise HTTPException(status_code=409, detail="sensitive category requires user_opted_in=true")
     result = store.store_and_user_opt_in(
-        req.category, req.content, req.source, req.confidence, req.user_opted_in
+        req.category, req.content, req.source, req.confidence, req.user_opted_in,
+        relationship=req.relationship,
     )
     if not result.ok:
         raise HTTPException(status_code=400, detail=result.error)
@@ -85,6 +87,7 @@ def _mem_dict(mem: Memory | None) -> dict:
         "category": mem.category.value,
         "content": mem.content,
         "source": mem.source,
+        "relationship": mem.relationship,
         "confidence": mem.confidence,
         "user_opted_in": mem.user_opted_in,
         "created_at": mem.created_at.isoformat(),

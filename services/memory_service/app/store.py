@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS memories (
     category       TEXT NOT NULL,
     content        TEXT NOT NULL,
     source         TEXT NOT NULL,
+    relationship   TEXT NOT NULL DEFAULT '',
     confidence     REAL NOT NULL DEFAULT 1.0,
     user_opted_in  INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL,
@@ -45,6 +46,13 @@ CREATE TABLE IF NOT EXISTS memories (
 
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
 """
+
+# Existing local databases predate the relationship field. Add it in place so
+# people memories can be tagged without losing stored history.
+_MEMORY_COLUMNS = (
+    "memory_id, category, content, source, relationship, confidence, "
+    "user_opted_in, created_at, updated_at"
+)
 
 
 class SensitiveOptInRequiredError(Exception):
@@ -69,10 +77,11 @@ def _row_to_memory(row: tuple) -> Memory:
         category=MemoryCategory(row[1]),
         content=row[2],
         source=row[3],
-        confidence=row[4],
-        user_opted_in=bool(row[5]),
-        created_at=datetime.fromisoformat(row[6]),
-        updated_at=datetime.fromisoformat(row[7]),
+        relationship=row[4],
+        confidence=row[5],
+        user_opted_in=bool(row[6]),
+        created_at=datetime.fromisoformat(row[7]),
+        updated_at=datetime.fromisoformat(row[8]),
     )
 
 
@@ -85,6 +94,11 @@ class MemoryStore:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(memories)")}
+        if "relationship" not in columns:
+            self._conn.execute(
+                "ALTER TABLE memories ADD COLUMN relationship TEXT NOT NULL DEFAULT ''"
+            )
         self._conn.commit()
 
     def close(self) -> None:
@@ -94,8 +108,18 @@ class MemoryStore:
             except sqlite3.Error:  # pragma: no cover
                 pass
 
-    def add(self, category: MemoryCategory, content: str, source: str, confidence: float = 1.0) -> StoreResult:
-        return self.store_and_user_opt_in(category, content, source, confidence, user_opted_in=False)
+    def add(
+        self,
+        category: MemoryCategory,
+        content: str,
+        source: str,
+        confidence: float = 1.0,
+        relationship: str = "",
+    ) -> StoreResult:
+        return self.store_and_user_opt_in(
+            category, content, source, confidence,
+            user_opted_in=False, relationship=relationship,
+        )
 
     def store_and_user_opt_in(
         self,
@@ -104,6 +128,7 @@ class MemoryStore:
         source: str,
         confidence: float = 1.0,
         user_opted_in: bool = False,
+        relationship: str = "",
     ) -> StoreResult:
         if category == MemoryCategory.SENSITIVE and not user_opted_in:
             logger.warning("Sensitive write refused without explicit opt-in")
@@ -118,14 +143,16 @@ class MemoryStore:
                 self._conn.execute(
                     """
                     INSERT INTO memories (memory_id, category, content, source,
-                                          confidence, user_opted_in, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                          relationship, confidence, user_opted_in,
+                                          created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         memory_id,
                         category.value,
                         content,
                         source,
+                        relationship,
                         float(confidence),
                         int(user_opted_in),
                         now,
@@ -141,8 +168,7 @@ class MemoryStore:
     def get(self, memory_id: str) -> StoreResult:
         with self._lock:
             row = self._conn.execute(
-                "SELECT memory_id, category, content, source, confidence, user_opted_in, "
-                "created_at, updated_at FROM memories WHERE memory_id = ?",
+                f"SELECT {_MEMORY_COLUMNS} FROM memories WHERE memory_id = ?",
                 (memory_id,),
             ).fetchone()
         if row is None:
@@ -153,13 +179,11 @@ class MemoryStore:
         with self._lock:
             if category is None:
                 rows = self._conn.execute(
-                    "SELECT memory_id, category, content, source, confidence, user_opted_in, "
-                    "created_at, updated_at FROM memories ORDER BY created_at"
+                    f"SELECT {_MEMORY_COLUMNS} FROM memories ORDER BY created_at"
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    "SELECT memory_id, category, content, source, confidence, user_opted_in, "
-                    "created_at, updated_at FROM memories WHERE category = ? ORDER BY created_at",
+                    f"SELECT {_MEMORY_COLUMNS} FROM memories WHERE category = ? ORDER BY created_at",
                     (category.value,),
                 ).fetchall()
         return [_row_to_memory(r) for r in rows]

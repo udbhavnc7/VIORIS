@@ -67,6 +67,7 @@ Current state, in short:
 - Proactive calls compose their digest from connected connectors via `DialogueOrchestrator`. The old scripted driving demo is opt-in (`{"demo": true}`) and demo contacts are no longer seeded by default.
 - User-defined call triggers (`time` at HH:MM, `task_completed` by request substring) live in `VIORIS_DATA_DIR/call_triggers.json`. `due()` is pure; `mark_fired()` runs only after a call is created, and a trigger consumes only itself — never the daily digest slot.
 - A ring pushes a full-screen in-app call to the paired phone (`apps/mobile_app/lib/call_screen.dart`). It is text-first and uses the same gateway session as the web console; `POST /v1/call/{id}/end` closes it and clears call-scoped trust/context.
+- Contacts and people memories carry a `relationship` field. `Contact.matches()` normalises "my wife"/"the spouse" (with synonym groups) at 0.9 — above name substrings (0.8), below explicit aliases (0.95). `priority` now round-trips through save/load, and "tell my wife …" resolves to the right contact without an alias.
 
 Do not add a new capability without going through the permission registry, audit events, and tests. When in doubt about ordering, follow `docs/05-roadmap-and-prompts.md`; the remaining work is incremental capability depth, not new phases.
 

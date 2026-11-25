@@ -219,6 +219,42 @@ class TestProactiveCallPipeline:
         assert result["action"] is None  # waiting for approval
 
     @pytest.mark.asyncio
+    async def test_handle_phone_message_tell_by_relationship(self):
+        """'tell my wife...' resolves without an explicit alias (item 10c)."""
+        contacts = ContactBook([Contact(name="Disha", relationship="wife")])
+        pipeline = ProactiveCallPipeline(
+            hub=FakeHub(), gmail=FakeGmail(connected=False), contacts=contacts
+        )
+        pipeline._schedule.trigger_hours = [datetime.now(UTC).hour]
+        call_id = await pipeline.tick()
+
+        result = await pipeline.handle_phone_message(
+            call_id, "tell my wife I'll be late"
+        )
+        assert "Disha" in result["response_text"]
+        assert "i'll be late" in result["response_text"].lower()
+        pending = pipeline.get_session(call_id).pending_actions
+        assert pending[0]["contact"] == "Disha"
+        assert pending[0]["message"] == "i'll be late"
+
+    @pytest.mark.asyncio
+    async def test_handle_phone_message_tell_by_the_spouse(self):
+        contacts = ContactBook([Contact(name="Disha", relationship="wife")])
+        pipeline = ProactiveCallPipeline(
+            hub=FakeHub(), gmail=FakeGmail(connected=False), contacts=contacts
+        )
+        pipeline._schedule.trigger_hours = [datetime.now(UTC).hour]
+        call_id = await pipeline.tick()
+
+        result = await pipeline.handle_phone_message(
+            call_id, "tell the spouse to book a table"
+        )
+        pending = pipeline.get_session(call_id).pending_actions
+        assert pending[0]["contact"] == "Disha"
+        assert pending[0]["message"] == "book a table"
+        assert "Disha" in result["response_text"]
+
+    @pytest.mark.asyncio
     async def test_handle_phone_message_approve(self):
         hub = FakeHub()
         pipeline = ProactiveCallPipeline(hub=hub, gmail=FakeGmail(connected=False))

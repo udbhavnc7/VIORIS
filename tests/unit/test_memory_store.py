@@ -1,5 +1,7 @@
 """Memory store unit tests: category separation, sensitive opt-in gate, delete."""
 
+import sqlite3
+
 import pytest
 
 from packages.shared.schemas import MemoryCategory
@@ -26,6 +28,45 @@ def test_add_and_get_roundtrip(store):
 
     got = store.get(mem.memory_id)
     assert got.ok and got.memory.content == "Alice prefers morning meetings"
+
+
+def test_people_memory_relationship_roundtrip(store):
+    res = store.add(
+        MemoryCategory.PEOPLE, "Disha is my wife", "user said on 2026-11-25",
+        relationship="wife",
+    )
+    assert res.ok and res.memory.relationship == "wife"
+    assert store.get(res.memory.memory_id).memory.relationship == "wife"
+    assert store.list(MemoryCategory.PEOPLE)[0].relationship == "wife"
+
+
+def test_legacy_database_gains_relationship_column(tmp_path):
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """CREATE TABLE memories (
+            memory_id TEXT PRIMARY KEY, category TEXT NOT NULL, content TEXT NOT NULL,
+            source TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 1.0,
+            user_opted_in INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL, embedding BLOB
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO memories
+           (memory_id, category, content, source, created_at, updated_at)
+           VALUES ('mem_1', 'people', 'Old fact', 'old source',
+                   '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"""
+    )
+    conn.commit()
+    conn.close()
+
+    store = MemoryStore(db)
+    try:
+        assert store.list()[0].relationship == ""
+        res = store.add(MemoryCategory.PEOPLE, "New fact", "user said", relationship="manager")
+        assert res.ok and res.memory.relationship == "manager"
+    finally:
+        store.close()
 
 
 def test_list_by_category_is_separated(store):

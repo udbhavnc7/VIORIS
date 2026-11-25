@@ -31,6 +31,21 @@ def test_create_and_list(client):
     assert len(listed) == 1 and listed[0]["memory_id"] == mem["memory_id"]
 
 
+def test_relationship_is_stored_and_returned(client):
+    r = client.post(
+        "/memory",
+        json={
+            "category": "people",
+            "content": "Disha is my wife",
+            "source": "user said",
+            "relationship": "wife",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["relationship"] == "wife"
+    assert client.get("/memory?category=people").json()[0]["relationship"] == "wife"
+
+
 def test_list_by_category(client):
     client.post("/memory", json={"category": "projects", "content": "p", "source": "s"})
     client.post("/memory", json={"category": "routines", "content": "r", "source": "s"})

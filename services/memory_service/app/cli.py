@@ -32,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--content", required=True)
     p.add_argument("--source", required=True)
     p.add_argument("--confidence", type=float, default=1.0)
+    p.add_argument("--relationship", default="", help="people relationship, e.g. spouse or manager")
     p.add_argument("--opt-in", dest="opt_in", action="store_true", help="explicit user opt-in (required for sensitive)")
 
     p = sub.add_parser("list", help="list memories")
@@ -55,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.source,
                 args.confidence,
                 user_opted_in=args.opt_in,
+                relationship=args.relationship,
             )
             if not res.ok:
                 print(f"ERROR: {res.error}")
@@ -93,6 +95,7 @@ def _mem_json(mem) -> dict:
         "category": mem.category.value,
         "content": mem.content,
         "source": mem.source,
+        "relationship": mem.relationship,
         "confidence": mem.confidence,
         "user_opted_in": mem.user_opted_in,
         "created_at": mem.created_at.isoformat(),
