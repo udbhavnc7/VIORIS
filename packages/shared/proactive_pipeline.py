@@ -16,6 +16,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -30,6 +31,7 @@ from .call_experience import (
     RingEvent,
     RingSource,
 )
+from .call_triggers import CallTriggerStore, TriggerMatch
 from .contacts import Contact, ContactBook
 from .dialogue import DialogueOrchestrator, SplitCommand
 from .email_connector import GmailConnector
@@ -156,6 +158,7 @@ class ProactiveCallPipeline:
         on_action: Optional[Callable] = None,
         dialogue: Optional[DialogueOrchestrator] = None,
         seed_demo_contacts: bool = False,
+        trigger_store: Optional[CallTriggerStore] = None,
     ):
         self.hub = hub
         self.gmail = gmail or GmailConnector()
@@ -165,6 +168,9 @@ class ProactiveCallPipeline:
                 self.contacts.add(contact)
         self.on_action = on_action  # callback for executing approved actions
         self.dialogue = dialogue or DialogueOrchestrator()
+        # Optional: user-defined call triggers. None means "no custom triggers"
+        # rather than silently creating a file in the data dir.
+        self.trigger_store = trigger_store
 
         self._sessions: dict[str, CallSession] = {}
         self._schedule = DigestSchedule()
@@ -172,8 +178,40 @@ class ProactiveCallPipeline:
 
     # ── tick: called periodically to check triggers ───────────────────────
 
-    async def tick(self) -> Optional[str]:
-        """Check if a digest should fire. Returns call_id if started."""
+    async def tick(
+        self, completed_tasks: Optional[Iterable[dict[str, Any]]] = None
+    ) -> Optional[str]:
+        """Check user triggers, then the daily digest schedule.
+
+        ``completed_tasks`` is the task-runner snapshot used by
+        ``task_completed`` triggers. A trigger is marked fired only after the
+        call is actually created, so a failed call retries on the next tick.
+        """
+        if self.trigger_store is not None:
+            matches = self.trigger_store.due(completed_tasks=completed_tasks)
+            if matches:
+                match = matches[0]
+                call_id = str(uuid.uuid4())[:8]
+                logger.info(
+                    "Call trigger %s fired (%s), starting call %s",
+                    match.trigger.trigger_id,
+                    match.reason,
+                    call_id,
+                )
+                extra_items = (
+                    [self._task_completed_item(match)] if match.task_id else None
+                )
+                await self._start_call(
+                    call_id,
+                    reason=match.reason,
+                    extra_items=extra_items,
+                    record_schedule=False,
+                )
+                self.trigger_store.mark_fired(
+                    match.trigger.trigger_id, task_id=match.task_id
+                )
+                return call_id
+
         if not self._schedule.should_trigger():
             return None
 
@@ -183,7 +221,28 @@ class ProactiveCallPipeline:
         session = await self._start_call(call_id, driving_scenario=False)
         return call_id
 
-    async def _start_call(self, call_id: str, driving_scenario: bool = False) -> CallSession:
+    @staticmethod
+    def _task_completed_item(match: TriggerMatch) -> DigestItem:
+        """Describe a finished task in the digest the user hears."""
+        request = match.task_request or "Your task"
+        return DigestItem(
+            item_type="task",
+            summary=f"{request} finished",
+            source="task_runner",
+            priority="normal",
+            actionable=False,
+            reference_id=match.task_id,
+        )
+
+    async def _start_call(
+        self,
+        call_id: str,
+        driving_scenario: bool = False,
+        *,
+        reason: Optional[str] = None,
+        extra_items: Optional[list[DigestItem]] = None,
+        record_schedule: bool = True,
+    ) -> CallSession:
         """Fetch items, compose digest, push ring to phone."""
         # Demo-only scenario must be asked for explicitly; production calls use
         # whichever connectors are actually connected.
@@ -193,6 +252,8 @@ class ProactiveCallPipeline:
 
         # 1. Fetch items from connectors
         items = await self._fetch_digest_items(driving_scenario=driving_scenario)
+        if extra_items:
+            items = [*extra_items, *items]
 
         # 2. Compose digest
         digest = ProactiveDigest(call_id=call_id, items=items)
@@ -216,7 +277,7 @@ class ProactiveCallPipeline:
             call_id=call_id,
             source=RingSource.PROACTIVE,
             caller_name="Vioris",
-            reason=f"Daily digest — {len(items)} items",
+            reason=reason or f"Daily digest — {len(items)} items",
         )
         self._call_experience.start_ring(ring)
 
@@ -234,7 +295,9 @@ class ProactiveCallPipeline:
             }
         )
 
-        self._schedule.record_trigger()
+        # A user trigger must not consume the daily digest slot.
+        if record_schedule:
+            self._schedule.record_trigger()
         logger.info("Ring pushed for call %s with %d items", call_id, len(items))
         return session
 

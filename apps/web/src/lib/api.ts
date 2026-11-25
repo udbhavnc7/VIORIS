@@ -187,6 +187,29 @@ export interface CallSession {
   created_at: string;
 }
 
+export type CallTriggerKind = "time" | "task_completed";
+
+export interface CallTrigger {
+  trigger_id: string;
+  kind: CallTriggerKind;
+  label: string;
+  at: string;
+  match: string;
+  enabled: boolean;
+  one_shot: boolean;
+  created_at: string;
+  last_fired_at: string | null;
+  fired_task_ids: string[];
+}
+
+export interface CreateCallTriggerInput {
+  kind: CallTriggerKind;
+  label?: string;
+  at?: string;
+  match?: string;
+  one_shot?: boolean;
+}
+
 const SESSION_KEY = "vioris.session.v1";
 
 export class ApiError extends Error {
@@ -407,10 +430,21 @@ export const api = {
   },
 
   calls: async () => (await request<{ calls: CallSession[] }>("/v1/calls")).calls ?? [],
-  triggerCall: () =>
+  triggerCall: (demo = true) =>
     request<{ call_id: string | null; status: string; note: string }>("/v1/call/trigger", {
       method: "POST",
-      body: { force: true },
+      body: { force: true, demo },
+    }),
+  callTriggers: async () =>
+    (await request<{ triggers: CallTrigger[] }>("/v1/call/triggers")).triggers ?? [],
+  createCallTrigger: (input: CreateCallTriggerInput) =>
+    request<{ trigger: CallTrigger }>("/v1/call/triggers", {
+      method: "POST",
+      body: input,
+    }),
+  deleteCallTrigger: (id: string) =>
+    request<{ trigger_id: string; deleted: boolean }>(`/v1/call/triggers/${id}`, {
+      method: "DELETE",
     }),
   speakCall: (id: string) =>
     request<{ spoken_text?: string; status: string }>(`/v1/call/${id}/speak`, { method: "POST" }),

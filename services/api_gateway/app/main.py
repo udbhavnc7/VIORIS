@@ -151,6 +151,20 @@ class ExplainQueryPayload(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
 
 
+class CallTriggerPayload(BaseModel):
+    """A user-defined reason for Vioris to place a proactive call.
+
+    ``kind="time"`` needs ``at`` in HH:MM form (local time).
+    ``kind="task_completed"`` needs a ``match`` substring for the task request.
+    """
+
+    kind: str = Field(description="time | task_completed")
+    label: str = ""
+    at: str | None = None
+    match: str | None = None
+    one_shot: bool = False
+
+
 def _device_dict(device) -> DeviceResponse:
     return DeviceResponse(
         device_id=device.device_id,
@@ -165,15 +179,33 @@ def _device_dict(device) -> DeviceResponse:
 _bg_task: asyncio.Task | None = None
 
 
+async def _completed_tasks_snapshot() -> list[dict]:
+    """Read the task-runner's task list for trigger evaluation.
+
+    Background polling cannot use ``_proxy`` because that requires a Device.
+    This is the same localhost-only read the gateway already performs, just
+    without a device in the loop.
+    """
+    try:
+        resp = await _client().get(f"{TASK_RUNNER_URL}/tasks", timeout=5.0)
+        resp.raise_for_status()
+        body = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return []
+    tasks = body.get("tasks") if isinstance(body, dict) else body
+    return [task for task in tasks or [] if isinstance(task, dict)]
+
+
 async def _digest_checker() -> None:
-    """Background loop: checks digest triggers every 60 seconds."""
+    """Background loop: checks digest and user call triggers every 60 seconds."""
     while True:
         await asyncio.sleep(60)
         try:
             pipeline = get_pipeline()
-            call_id = await pipeline.tick()
+            completed = await _completed_tasks_snapshot()
+            call_id = await pipeline.tick(completed_tasks=completed)
             if call_id:
-                logger.info("Background digest triggered: call %s", call_id)
+                logger.info("Background trigger started call %s", call_id)
         except Exception as exc:
             logger.warning("Digest checker error: %s", exc)
 
@@ -353,9 +385,12 @@ def get_pipeline():
     """Lazy-init the proactive call pipeline."""
     global _pipeline
     if _pipeline is None:
+        from packages.shared.call_triggers import CallTriggerStore
         from packages.shared.proactive_pipeline import ProactiveCallPipeline
 
-        _pipeline = ProactiveCallPipeline(hub=get_hub())
+        _pipeline = ProactiveCallPipeline(
+            hub=get_hub(), trigger_store=CallTriggerStore()
+        )
         _setup_hub_handlers(get_hub(), _pipeline)
     return _pipeline
 
@@ -604,6 +639,55 @@ async def trigger_call(
         "call_id": None,
         "status": "no_trigger",
         "note": "Digest schedule did not trigger (wrong hour or too recent)",
+    }
+
+
+@app.get("/v1/call/triggers")
+async def list_call_triggers(device: Device = Depends(_require_device)) -> dict:
+    """List user-defined proactive call triggers."""
+    store = get_pipeline().trigger_store
+    triggers = store.list() if store is not None else []
+    return {
+        "device": device.device_id,
+        "triggers": [trigger.to_dict() for trigger in triggers],
+    }
+
+
+@app.post("/v1/call/triggers")
+async def create_call_trigger(
+    payload: CallTriggerPayload, device: Device = Depends(_require_device)
+) -> dict:
+    """Create a time or task-completion call trigger."""
+    from packages.shared.call_triggers import TriggerValidationError
+
+    store = get_pipeline().trigger_store
+    if store is None:
+        raise HTTPException(status_code=503, detail="call triggers are not configured")
+    try:
+        trigger = store.create(
+            kind=payload.kind,
+            label=payload.label,
+            at=payload.at,
+            match=payload.match,
+            one_shot=payload.one_shot,
+        )
+    except TriggerValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"device": device.device_id, "trigger": trigger.to_dict()}
+
+
+@app.delete("/v1/call/triggers/{trigger_id}")
+async def delete_call_trigger(
+    trigger_id: str, device: Device = Depends(_require_device)
+) -> dict:
+    """Delete a call trigger. Missing ids are a 404, never a silent success."""
+    store = get_pipeline().trigger_store
+    if store is None or not store.delete(trigger_id):
+        raise HTTPException(status_code=404, detail="trigger not found")
+    return {
+        "device": device.device_id,
+        "trigger_id": trigger_id,
+        "deleted": True,
     }
 
 
