@@ -56,7 +56,16 @@ Backend/orchestration: FastAPI (Python) · Task queue: Celery + Redis · DB: Pos
 
 ## Current build phase
 
-We are starting **Phase 1 — Safe Local Assistant** (see `docs/05-roadmap-and-prompts.md`). No external account access happens in this phase — wake word, STT/TTS, basic local commands, stop command, local task history only. Do not implement any connector, browser automation, or account integration until Phase 1 is fully working and tested.
+The **working v1 local preview is complete**: phases 1–10 of `docs/05-roadmap-and-prompts.md` run end to end, plus the post-roadmap capabilities already shipped (proactive-call pipeline, plan explainability, kill-phrase preemption, and approved Gmail reactions/replies).
+
+Current state, in short:
+
+- 48 statically registered tools across Observe / Prepare / Execute / Critical; the registry is the sole authority on risk.
+- The loop runs locally: plan → static classification → diff card → approval → execute → verify → hash-chained audit.
+- Demo connectors are the default runtime. Real Gmail is opt-in and read-only by default; Gmail write scopes (`gmail.modify`, `gmail.send`) are requested explicitly and only used by the separate `GmailWriteConnector`.
+- Gmail `react` and `send_reply` are **Execute** tier with approval-ledger verification and idempotent replay. React maps to reversible label changes; reply sends an RFC822 message. In demo mode both refuse honestly instead of claiming delivery.
+
+Do not add a new capability without going through the permission registry, audit events, and tests. When in doubt about ordering, follow `docs/05-roadmap-and-prompts.md`; the remaining work is incremental capability depth, not new phases.
 
 ## Working style
 
