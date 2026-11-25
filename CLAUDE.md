@@ -64,6 +64,7 @@ Current state, in short:
 - The loop runs locally: plan → static classification → diff card → approval → execute → verify → hash-chained audit.
 - Demo connectors are the default runtime. Real Gmail is opt-in and read-only by default; Gmail write scopes (`gmail.modify`, `gmail.send`) are requested explicitly and only used by the separate `GmailWriteConnector`.
 - Gmail `react` and `send_reply` are **Execute** tier with approval-ledger verification and idempotent replay. React maps to reversible label changes; reply sends an RFC822 message. In demo mode both refuse honestly instead of claiming delivery.
+- Proactive calls compose their digest from connected connectors via `DialogueOrchestrator`. The old scripted driving demo is opt-in (`{"demo": true}`) and demo contacts are no longer seeded by default.
 
 Do not add a new capability without going through the permission registry, audit events, and tests. When in doubt about ordering, follow `docs/05-roadmap-and-prompts.md`; the remaining work is incremental capability depth, not new phases.
 

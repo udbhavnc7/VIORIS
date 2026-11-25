@@ -50,6 +50,7 @@ For phone access, put the laptop and the phone on a [Tailscale](https://tailscal
 What is deliberately simulated:
 
 - **Connectors are honest demo mode by default.** Gmail, WhatsApp, Calendar, Contacts, Notes, Files, Bookmarks, History, Telephony, Reservations, and Smart Home return sample *reads* with a `demo: true` marker until real credentials are configured. Every *write* — send a message, create a reservation, start a call, control a device — is refused by the sample service and reported as failed in the audit chain. Nothing claims to have been sent when it was not. Real Gmail writes are opt-in: `POST /connect/start` with `{"include_write": true}` requests `gmail.modify` and `gmail.send`, and only the separate write connector uses them. Reads stay read-only.
+- **Proactive calls are data-driven.** The spoken digest is composed from whatever the connected connectors return, using the dialogue layer's decomposer/composer. The scripted driving scenario is an explicit demo (`{"force": true, "demo": true}` on `/v1/call/trigger`); scheduled production calls never use it, and demo contacts are not seeded by default.
 - **Critical is locked by default.** Critical steps require `--critical-pin`, an HMAC second factor, and a five-second cooldown before the decision is accepted.
 - **The computer agent is local-only.** Screen mirroring and remote input work over loopback/Tailscale; they are not exposed publicly.
 - **No server-initiated phone calls.** The phone is a command surface, not an outbound autodialer.

@@ -31,9 +31,57 @@ from .call_experience import (
     RingSource,
 )
 from .contacts import Contact, ContactBook
+from .dialogue import DialogueOrchestrator, SplitCommand
 from .email_connector import GmailConnector
 
 logger = logging.getLogger(__name__)
+
+# Explicitly named demo fixture used only by the scripted driving scenario.
+# Production calls are built from whatever the connectors actually return.
+_DEMO_DRIVING_ITEMS: list[dict[str, Any]] = [
+    {
+        "item_type": "task",
+        "summary": "Project LUME completed Phase 4",
+        "source": "orchestrator",
+        "priority": "normal",
+        "actionable": True,
+    },
+    {
+        "item_type": "email",
+        "summary": "From RazorClub: Tomorrow will be an important meeting on next hires",
+        "source": "gmail",
+        "priority": "high",
+        "actionable": True,
+        "sender": "RazorClub",
+        "subject": "Tomorrow will be an important meeting on next hires",
+    },
+    {
+        "item_type": "message",
+        "summary": "From Disha (wife): When are you reaching home?",
+        "source": "whatsapp",
+        "priority": "high",
+        "actionable": True,
+        "sender": "Disha",
+        "subject": "When are you reaching home?",
+        "channel": "whatsapp",
+    },
+]
+
+_DEMO_CONTACTS = [
+    Contact(name="Shravan G", email="shravan.g@example.com", phone="+919876543210"),
+    Contact(
+        name="Shravan GK",
+        email="shravan.gk@sceptix.com",
+        phone="+919876543211",
+        aliases=["sceptix"],
+    ),
+    Contact(
+        name="Disha",
+        phone="+919876500001",
+        relationship="wife",
+        aliases=["wife"],
+    ),
+]
 
 
 class CallRole(Enum):
@@ -106,15 +154,17 @@ class ProactiveCallPipeline:
         gmail: Optional[GmailConnector] = None,
         contacts: Optional[ContactBook] = None,
         on_action: Optional[Callable] = None,
+        dialogue: Optional[DialogueOrchestrator] = None,
+        seed_demo_contacts: bool = False,
     ):
         self.hub = hub
         self.gmail = gmail or GmailConnector()
         self.contacts = contacts or ContactBook()
-        if not self.contacts.list_all():
-            self.contacts.add(Contact(name="Shravan G", email="shravan.g@example.com", phone="+919876543210"))
-            self.contacts.add(Contact(name="Shravan GK", email="shravan.gk@sceptix.com", phone="+919876543211", aliases=["sceptix"]))
-            self.contacts.add(Contact(name="Disha", phone="+919876500001", relationship="wife", aliases=["wife"]))
+        if seed_demo_contacts and not self.contacts.list_all():
+            for contact in _DEMO_CONTACTS:
+                self.contacts.add(contact)
         self.on_action = on_action  # callback for executing approved actions
+        self.dialogue = dialogue or DialogueOrchestrator()
 
         self._sessions: dict[str, CallSession] = {}
         self._schedule = DigestSchedule()
@@ -133,20 +183,24 @@ class ProactiveCallPipeline:
         session = await self._start_call(call_id, driving_scenario=False)
         return call_id
 
-    async def _start_call(self, call_id: str, driving_scenario: bool = True) -> CallSession:
+    async def _start_call(self, call_id: str, driving_scenario: bool = False) -> CallSession:
         """Fetch items, compose digest, push ring to phone."""
+        # Demo-only scenario must be asked for explicitly; production calls use
+        # whichever connectors are actually connected.
+        if driving_scenario and not self.contacts.list_all():
+            for contact in _DEMO_CONTACTS:
+                self.contacts.add(contact)
+
         # 1. Fetch items from connectors
         items = await self._fetch_digest_items(driving_scenario=driving_scenario)
 
         # 2. Compose digest
         digest = ProactiveDigest(call_id=call_id, items=items)
 
-        # 3. Personalized spoken greeting for the driving workflow
-        has_project = any("lume" in (i.summary or "").lower() for i in items)
-        if has_project or driving_scenario:
-            spoken_text = "Mr Chandragiri, your project LUME has completed 4 phases, do you wanna continue with the next phase?"
-        else:
-            spoken_text = digest.compose_spoken()
+        # 3. Compose the greeting from the real items via the dialogue layer.
+        #    No canned names or project scripts live in this path.
+        self.dialogue.start_call()
+        spoken_text = self._compose_digest_speech(items)
 
         # 4. Create session
         session = CallSession(
@@ -201,38 +255,64 @@ class ProactiveCallPipeline:
                             source="gmail",
                             priority="high" if not msg.is_read else "normal",
                             actionable=True,
+                            sender=sender,
+                            subject=msg.subject,
+                            channel="email",
+                            reference_id=msg.id,
                         )
                     )
             except Exception as exc:
                 logger.warning("Failed to fetch Gmail: %s", exc)
 
         if not items and driving_scenario:
-            # Proactive workflow items (project status, unread email, spouse message)
-            items.extend([
-                DigestItem(
-                    item_type="task",
-                    summary="Project LUME completed Phase 4",
-                    source="orchestrator",
-                    priority="normal",
-                    actionable=True,
-                ),
-                DigestItem(
-                    item_type="email",
-                    summary="From RazorClub: Tomorrow will be an important meeting on next hires",
-                    source="gmail",
-                    priority="high",
-                    actionable=True,
-                ),
-                DigestItem(
-                    item_type="message",
-                    summary="From Disha (wife): When are you reaching home?",
-                    source="whatsapp",
-                    priority="high",
-                    actionable=True,
-                ),
-            ])
+            items.extend(DigestItem(**item) for item in _DEMO_DRIVING_ITEMS)
 
         return items
+
+    def _compose_digest_speech(self, items: list[DigestItem]) -> str:
+        """Compose a spoken greeting from the actual digest items.
+
+        Uses the dialogue layer's composer/actionability flagger so the
+        greeting reflects the real senders and subjects, not a canned script.
+        """
+        if not items:
+            return "Nothing new right now."
+
+        tool_results = [self._item_to_tool_result(item) for item in items]
+        actionables = self.dialogue.flagger.flag(tool_results, source_type="email")
+        composed = self.dialogue.composer.compose(tool_results, actionables=actionables)
+
+        if composed.follow_up:
+            return f"{composed.spoken} {composed.follow_up}"
+        return composed.spoken
+
+    @staticmethod
+    def _item_to_tool_result(item: DigestItem) -> dict[str, Any]:
+        """Shape a digest item for the dialogue response composer."""
+        result: dict[str, Any] = {
+            "tool": item.source or item.item_type,
+            "summary": item.summary,
+            "urgency": item.priority,
+        }
+        if item.item_type == "email":
+            result["sender"] = item.sender or ProactiveCallPipeline._sender_from_summary(item.summary)
+            result["subject"] = item.subject or ProactiveCallPipeline._subject_from_summary(item.summary)
+        elif item.item_type in ("message", "sms", "whatsapp"):
+            result["sender"] = item.sender or ProactiveCallPipeline._sender_from_summary(item.summary)
+            result["summary"] = item.subject or item.summary
+        return result
+
+    @staticmethod
+    def _sender_from_summary(summary: str) -> str:
+        if summary.lower().startswith("from "):
+            return summary[5:].split(":", 1)[0].strip()
+        return ""
+
+    @staticmethod
+    def _subject_from_summary(summary: str) -> str:
+        if summary.lower().startswith("from ") and ":" in summary:
+            return summary.split(":", 1)[1].strip()
+        return summary
 
     # ── handle phone accepting the call ───────────────────────────────────
 
@@ -295,6 +375,19 @@ class ProactiveCallPipeline:
     ) -> dict[str, Any]:
         """Route utterance to the right handler based on context."""
         lower = utterance.lower().strip()
+
+        # Let the dialogue layer track entities/context and split compound
+        # instructions. The domain handlers below decide what to prepare; the
+        # orchestrator ensures multi-clause replies are scoped correctly.
+        dialogue_result = self.dialogue.process(utterance)
+        session.metadata["dialogue_intents"] = [
+            {
+                "text": intent.text,
+                "intent_type": intent.intent_type,
+                "negated": intent.negated,
+            }
+            for intent in dialogue_result.sub_intents
+        ]
 
         # ── End the call ──
         if (
@@ -427,67 +520,45 @@ class ProactiveCallPipeline:
         # ── Standalone Open Mail ──
         if lower in ("open mail", "open gmail", "check mail", "check inbox", "my mails", "mails"):
             return {
-                "response_text": "Opening mail. You have 1 unread email from RazorClub regarding tomorrow's meeting on next hires. What would you like to reply?",
+                "response_text": self._describe_mail(session),
                 "action": {"type": "open_app", "target": "gmail"},
                 "digest_status": "awaiting_response",
             }
 
-        # ── Compound command: "don't reply to the mail, just react with thumbs up, tell disha..." ──
-        has_mail_decision = any(w in lower for w in ("don't reply", "dont reply", "do not reply", "react", "thumbs up", "thumbs-up", "👍"))
-        has_disha_decision = any(w in lower for w in ("disha", "wife", "reaching", "home"))
-
-        if has_mail_decision and has_disha_decision:
-            reaction = "👍"
-            disha_msg = "I'll be reaching in another hour"
-            actions = [
-                {
-                    "type": "react_email",
-                    "target": "RazorClub",
-                    "reaction": reaction,
-                    "status": "not_executed",
-                    "description": f"prepared {reaction} reaction to RazorClub mail — not executed (demo mode)",
-                },
-                {
-                    "type": "send_message",
-                    "target": "Disha",
-                    "channel": "whatsapp",
-                    "message": disha_msg,
-                    "status": "not_sent",
-                    "description": f"prepared message to Disha: '{disha_msg}' — not sent (no transport linked)",
-                },
-            ]
-            session.metadata["last_prepared"] = actions
+        # ── Compound command ──
+        # Decompose the reply into independent instructions, then prepare each
+        # resolvable action against the current digest/contact book. If fewer
+        # than two actions resolve, fall through to the single-intent handlers
+        # so we never invent a target the user did not mention.
+        compound_actions = self._prepare_compound_actions(
+            session, dialogue_result.split_commands
+        )
+        if len(compound_actions) >= 2:
+            targets = ", ".join(
+                str(action.get("target") or action.get("recipient") or "unknown")
+                for action in compound_actions
+            )
+            session.metadata["last_prepared"] = compound_actions
             session.status = DigestStatus.RESPONSE_RECEIVED
             return {
-                "response_text": "I've prepared both actions, but nothing was delivered: the mail reaction and WhatsApp transport aren't connected. Want me to queue them once a transport is linked?",
-                "action": {"type": "compound_prepare", "actions": actions},
+                "response_text": (
+                    f"I've prepared {len(compound_actions)} actions, but nothing was "
+                    f"delivered: no transport is linked for {targets}. Want me to "
+                    "queue them once a transport is connected?"
+                ),
+                "action": {"type": "compound_prepare", "actions": compound_actions},
                 "digest_status": "awaiting_response",
             }
 
-        # ── Multi-intent query: Project continuation + Mail + Disha query ──
+        # ── Multi-intent query: project continuation + mail + messages ──
         has_continue = any(w in lower for w in ("go on", "continue", "yes, go on", "yes go on", "start next", "next phase"))
         has_mail_query = any(w in lower for w in ("mail", "email", "inbox"))
-        has_text_query = any(w in lower for w in ("disha", "text", "message", "wife"))
+        has_text_query = any(w in lower for w in ("text", "message", "sms", "whatsapp"))
 
         if (has_mail_query and has_text_query) or (has_continue and (has_mail_query or has_text_query)):
-            session.pending_actions.clear()
-            session.pending_actions.append(
-                {
-                    "type": "continue_project",
-                    "project": "LUME",
-                    "description": "continue next phase of project LUME",
-                }
+            return self._answer_inbox_query(
+                session, include_continue=has_continue, include_mail=has_mail_query
             )
-            session.metadata["awaiting_decision"] = True
-            return {
-                "response_text": (
-                    "Yes sir, currently one important mail has been sent from RazorClub and it states that "
-                    "tomorrow there will be an important meeting on the topic of next hires, also your wife Disha "
-                    "has sent a text asking, when are you reaching home? what do I reply to the mail and to your wife?"
-                ),
-                "action": None,
-                "digest_status": "awaiting_response",
-            }
 
         # ── Skip / dismiss items ──
         if lower in ("skip", "next", "dismiss", "ignore", "no"):
@@ -554,18 +625,23 @@ class ProactiveCallPipeline:
         if "tell" in lower or "reply" in lower or "message" in lower:
             contact_name = self._extract_contact(lower)
             if contact_name:
-                message = self._extract_message_after(lower)
+                contact = self.contacts.best_match(contact_name)
+                message = (
+                    self._message_for_contact(lower, contact)
+                    if contact
+                    else self._extract_message_after(lower)
+                )
                 if message:
                     session.pending_actions.append(
                         {
                             "type": "message",
-                            "contact": contact_name,
+                            "contact": contact.name if contact else contact_name,
                             "message": message,
-                            "description": f"message to {contact_name}",
+                            "description": f"message to {contact.name if contact else contact_name}",
                         }
                     )
                     return {
-                        "response_text": f"Got it. I'll tell {contact_name}: {message}. Should I send it?",
+                        "response_text": f"Got it. I'll tell {contact.name if contact else contact_name}: {message}. Should I send it?",
                         "action": None,
                         "digest_status": "awaiting_response",
                     }
@@ -578,9 +654,30 @@ class ProactiveCallPipeline:
         # ── React to email ──
         if "react" in lower or any(emoji in lower for emoji in ("👍", "❤️", "😄")):
             reaction = self._extract_reaction(lower)
+            if not reaction:
+                return {
+                    "response_text": "What reaction?",
+                    "action": None,
+                    "digest_status": "awaiting_response",
+                }
+            target = self._first_digest_item(session, "email")
+            target_name = (
+                (target.sender if target and target.sender else "")
+                or (self._sender_from_summary(target.summary) if target else "")
+                or "the email"
+            )
             return {
-                "response_text": f"Reacted with {reaction}." if reaction else "What reaction?",
-                "action": {"type": "react", "reaction": reaction} if reaction else None,
+                "response_text": (
+                    f"I've prepared a {reaction} reaction to {target_name}'s mail. "
+                    "It has not been applied — no mail write transport is connected."
+                ),
+                "action": {
+                    "type": "react",
+                    "reaction": reaction,
+                    "target": target_name,
+                    "reference_id": target.reference_id if target else "",
+                    "status": "not_executed",
+                },
                 "digest_status": "awaiting_response",
             }
 
@@ -614,17 +711,204 @@ class ProactiveCallPipeline:
         )
         return session.digest.items[spoken_count:]
 
+    # ── digest-driven responses ───────────────────────────────────────────
+
+    def _digest_items(self, session: CallSession) -> list[DigestItem]:
+        return session.digest.items if session.digest else []
+
+    def _items_of_type(self, session: CallSession, *item_types: str) -> list[DigestItem]:
+        wanted = set(item_types)
+        return [item for item in self._digest_items(session) if item.item_type in wanted]
+
+    def _first_digest_item(self, session: CallSession, item_type: str) -> Optional[DigestItem]:
+        for item in self._digest_items(session):
+            if item.item_type == item_type:
+                return item
+        return None
+
+    @staticmethod
+    def _join_summaries(items: list[DigestItem], limit: int = 3) -> str:
+        summaries = [item.summary for item in items[:limit]]
+        text = "; ".join(summaries)
+        if len(items) > limit:
+            text += f"; and {len(items) - limit} more"
+        return text
+
+    @staticmethod
+    def _as_sentence(text: str) -> str:
+        text = text.strip()
+        if text and text[-1] not in ".!?":
+            return text + "."
+        return text
+
+    def _describe_mail(self, session: CallSession) -> str:
+        emails = self._items_of_type(session, "email")
+        if not emails:
+            return "You have no unread mail right now. What would you like to do?"
+        noun = "email" if len(emails) == 1 else "emails"
+        body = f"You have {len(emails)} unread {noun}: {self._join_summaries(emails)}"
+        return f"{self._as_sentence(body)} What would you like to do?"
+
+    def _answer_inbox_query(
+        self,
+        session: CallSession,
+        *,
+        include_continue: bool,
+        include_mail: bool,
+    ) -> dict[str, Any]:
+        """Answer a mail/message query using the digest, not a canned script."""
+        emails = self._items_of_type(session, "email")
+        messages = self._items_of_type(session, "message", "sms", "whatsapp")
+        tasks = self._items_of_type(session, "task")
+
+        if include_continue:
+            session.pending_actions.clear()
+            if tasks:
+                task = tasks[0]
+                session.pending_actions.append(
+                    {
+                        "type": "continue_task",
+                        "task": task.summary,
+                        "description": f"continue {task.summary}",
+                    }
+                )
+
+        parts: list[str] = []
+        if include_mail:
+            if emails:
+                parts.append(f"You have {len(emails)} unread email(s): {self._join_summaries(emails)}")
+            else:
+                parts.append("You have no unread mail")
+        if messages:
+            parts.append(f"Messages: {self._join_summaries(messages)}")
+
+        if not parts:
+            return {
+                "response_text": "I don't see any unread mail or messages right now. What would you like to do?",
+                "action": None,
+                "digest_status": "awaiting_response",
+            }
+
+        session.metadata["awaiting_decision"] = bool(session.pending_actions)
+        return {
+            "response_text": f"{self._as_sentence('. '.join(parts))} What would you like to do?",
+            "action": None,
+            "digest_status": "awaiting_response",
+        }
+
+    # ── compound command preparation ──────────────────────────────────────
+
+    def _prepare_compound_actions(
+        self, session: CallSession, commands: list[SplitCommand]
+    ) -> list[dict[str, Any]]:
+        """Prepare each independent instruction without executing anything.
+
+        Targets come from the digest (for mail reactions) and the contact book
+        (for messages). Unresolvable clauses are dropped rather than filled in
+        with a demo name.
+        """
+        actions: list[dict[str, Any]] = []
+        for command in commands:
+            if command.negated:
+                continue
+            text = command.text
+            low = text.lower()
+
+            if command.action == "react":
+                email = self._first_digest_item(session, "email")
+                reaction = self._extract_reaction(low)
+                if not email or not reaction:
+                    continue
+                target_name = (
+                    email.sender or self._sender_from_summary(email.summary) or "the email"
+                )
+                actions.append(
+                    {
+                        "type": "react_email",
+                        "target": target_name,
+                        "reference_id": email.reference_id,
+                        "reaction": reaction,
+                        "status": "not_executed",
+                        "description": (
+                            f"prepared {reaction} reaction to {target_name}'s mail "
+                            "— not executed (no mail write transport linked)"
+                        ),
+                    }
+                )
+                continue
+
+            if command.action == "send":
+                contact = self._resolve_contact_from_text(text)
+                if not contact:
+                    continue
+                message = self._message_for_contact(text, contact)
+                if not message:
+                    continue
+                channel = "email" if contact.email and not contact.phone else "sms" if contact.phone else ""
+                actions.append(
+                    {
+                        "type": "send_message",
+                        "target": contact.name,
+                        "channel": channel,
+                        "message": message,
+                        "status": "not_sent",
+                        "description": (
+                            f"prepared message to {contact.name}: '{message}' "
+                            "— not sent (no transport linked)"
+                        ),
+                    }
+                )
+        return actions
+
+    def _resolve_contact_from_text(self, text: str) -> Optional[Contact]:
+        name = self._extract_contact(text.lower())
+        if not name:
+            return None
+        matches = self.contacts.find(name, threshold=0.5)
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _message_for_contact(text: str, contact: Contact) -> Optional[str]:
+        """Pull the message body that follows a contact name."""
+        low = text.lower()
+        token = contact.name
+        idx = low.find(token.lower())
+        if idx == -1:
+            for alias in contact.aliases:
+                idx = low.find(alias.lower())
+                if idx != -1:
+                    token = alias
+                    break
+        if idx == -1:
+            return None
+        rest = text[idx + len(token):].strip(" ,.")
+        for prefix in ("that ", "to ", "saying ", "says ", "said ", "hey ", "hi "):
+            if rest.lower().startswith(prefix):
+                rest = rest[len(prefix):].strip()
+                break
+        return rest.strip().strip('"').strip("'") or None
+
     def _extract_contact(self, text: str) -> Optional[str]:
-        """Extract contact name from 'tell disha ...' pattern."""
+        """Extract a contact name from 'tell disha ...' style patterns."""
+        stop_words = {
+            "that", "to", "says", "said", "saying", "hey", "hi",
+            "i", "i'll", "i'm", "im", "you", "we", "he", "she", "they", "it",
+            "is", "am", "are", "was", "were", "will", "would", "can", "could",
+            "should", "please", "and", "also", "just", "about", "when", "where",
+            "what", "how", "for", "from", "with", "a", "an", "the",
+        }
         for prefix in ("tell ", "message ", "reply to "):
             if prefix in text:
                 after = text.split(prefix, 1)[1]
                 words = after.split()
                 if words:
-                    # Take first word(s) as contact name (up to 3 words)
+                    # Take leading name words, stopping at the first verb/pronoun
+                    # so "tell Disha I'll be late" resolves to "Disha", not
+                    # "Disha I'll Be".
                     name_parts = []
                     for w in words[:3]:
-                        if w in ("that", "to", "says", "said", "hey", "hi"):
+                        clean = w.strip(",.!?")
+                        if clean in stop_words or "'" in clean:
                             break
                         name_parts.append(w.capitalize())
                     return " ".join(name_parts) if name_parts else None

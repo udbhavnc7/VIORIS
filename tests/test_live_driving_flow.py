@@ -42,7 +42,7 @@ async def test_live_driving_flow():
         log("Triggering proactive call via REST POST /v1/call/trigger...")
         req = urllib.request.Request(
             "http://127.0.0.1:8420/v1/call/trigger",
-            data=b'{"force": true}',
+            data=b'{"force": true, "demo": true}',
             headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
         )
         with urllib.request.urlopen(req) as resp:
@@ -64,7 +64,9 @@ async def test_live_driving_flow():
         log(f"Received after accept: {msg['type']}")
         greeting = msg["payload"].get("text", "")
         log(f"Vioris Greeting: '{greeting}'")
-        assert "LUME" in greeting and "completed" in greeting and "next phase" in greeting
+        assert "LUME" in greeting
+        assert "RazorClub" in greeting
+        assert "Disha" in greeting
 
         # Step 4: Turn 1 - User commands: open mail, send a mail to shravan saying Hi Sceptix
         user_turn1 = "open mail, send a mail to shravan saying Hi Sceptix"

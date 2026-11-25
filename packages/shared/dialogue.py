@@ -574,16 +574,22 @@ class ResponseComposer:
         if len(parts) == 1:
             spoken = parts[0]
         elif len(parts) == 2:
-            spoken = f"{parts[0]} and {parts[1].lower()}"
+            spoken = f"{parts[0]} and {parts[1]}"
         else:
-            spoken = ", ".join(parts[:-1]) + f", and {parts[-1].lower()}"
+            spoken = ", ".join(parts[:-1]) + f", and {parts[-1]}"
 
         # Add actionable items as a follow-up question
         follow_up = ""
         if all_actionables:
             if len(all_actionables) == 1:
                 a = all_actionables[0]
-                follow_up = f"Would you like to {a.suggested_action} to {a.sender}?"
+                if a.suggested_action in ("reply", "respond", "react", "forward"):
+                    follow_up = f"Would you like to {a.suggested_action} to {a.sender}?"
+                else:
+                    follow_up = (
+                        f"{a.sender} may need attention. "
+                        f"Would you like to {a.suggested_action} it?"
+                    )
             else:
                 senders = ", ".join(a.sender for a in all_actionables[:3])
                 follow_up = f"These look like they need responses: {senders}. What would you like to do?"

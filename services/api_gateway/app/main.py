@@ -576,17 +576,20 @@ async def trigger_call(
     device: Device = Depends(_require_device),
 ) -> dict:
     """Manually trigger a proactive call to all connected phones.
-    
+
     Pass {"force": true} to bypass the digest schedule check.
+    Pass {"demo": true} to use the scripted driving-scenario fixture.
+    Production calls use whatever connectors are actually connected.
     """
     force = (payload or {}).get("force", False)
+    demo = bool((payload or {}).get("demo", False))
     pipeline = get_pipeline()
 
     if force:
         # Bypass schedule — directly start a call
         import uuid
         call_id = str(uuid.uuid4())[:8]
-        await pipeline._start_call(call_id)
+        await pipeline._start_call(call_id, driving_scenario=demo)
     else:
         call_id = await pipeline.tick()
     if call_id:

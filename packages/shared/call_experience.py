@@ -133,14 +133,34 @@ class EmailReact:
 
 
 class DigestItem:
-    """A single item in a proactive digest."""
+    """A single item in a proactive digest.
 
-    def __init__(self, item_type: str, summary: str, source: str, priority: str = "normal", actionable: bool = False):
+    ``summary`` stays the human-readable line. The optional structured fields
+    let the dialogue layer compose a response from the real item instead of
+    parsing display text or falling back to a canned script.
+    """
+
+    def __init__(
+        self,
+        item_type: str,
+        summary: str,
+        source: str,
+        priority: str = "normal",
+        actionable: bool = False,
+        sender: str = "",
+        subject: str = "",
+        channel: str = "",
+        reference_id: str = "",
+    ):
         self.item_type = item_type
         self.summary = summary
         self.source = source
         self.priority = priority
         self.actionable = actionable
+        self.sender = sender
+        self.subject = subject
+        self.channel = channel
+        self.reference_id = reference_id
 
     def to_dict(self) -> dict:
         return {
@@ -149,6 +169,10 @@ class DigestItem:
             "source": self.source,
             "priority": self.priority,
             "actionable": self.actionable,
+            "sender": self.sender,
+            "subject": self.subject,
+            "channel": self.channel,
+            "reference_id": self.reference_id,
         }
 
 

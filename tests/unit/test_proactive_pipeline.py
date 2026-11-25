@@ -202,7 +202,12 @@ class TestProactiveCallPipeline:
     @pytest.mark.asyncio
     async def test_handle_phone_message_tell_contact(self):
         hub = FakeHub()
-        pipeline = ProactiveCallPipeline(hub=hub, gmail=FakeGmail(connected=False))
+        contacts = ContactBook(
+            [Contact(name="Disha", phone="+919876500001", aliases=["wife"])]
+        )
+        pipeline = ProactiveCallPipeline(
+            hub=hub, gmail=FakeGmail(connected=False), contacts=contacts
+        )
         pipeline._schedule.trigger_hours = [datetime.now(UTC).hour]
         call_id = await pipeline.tick()
 
@@ -295,6 +300,72 @@ class TestProactiveCallPipeline:
         assert session.digest.items[0].item_type == "email"
         assert "Alice" in session.digest.items[0].summary
 
+    @pytest.mark.asyncio
+    async def test_no_demo_contacts_or_script_by_default(self):
+        hub = FakeHub()
+        pipeline = ProactiveCallPipeline(hub=hub, gmail=FakeGmail(connected=False))
+        assert pipeline.contacts.count() == 0
+
+        pipeline._schedule.trigger_hours = [datetime.now(UTC).hour]
+        call_id = await pipeline.tick()
+        session = pipeline.get_session(call_id)
+        assert session.spoken_text == "Nothing new right now."
+        assert "Chandragiri" not in session.spoken_text
+        assert "LUME" not in session.spoken_text
+
+    @pytest.mark.asyncio
+    async def test_open_mail_uses_the_connected_mailbox(self):
+        from packages.shared.email_connector import EmailMessage
+
+        messages = [
+            EmailMessage(
+                id="m1",
+                from_addr="Alice <alice@test.com>",
+                subject="Budget review",
+                is_read=False,
+            )
+        ]
+        pipeline = ProactiveCallPipeline(
+            hub=FakeHub(),
+            gmail=FakeGmail(connected=True, messages=messages),
+        )
+        pipeline._schedule.trigger_hours = [datetime.now(UTC).hour]
+        call_id = await pipeline.tick()
+
+        result = await pipeline.handle_phone_message(call_id, "open mail")
+        text = result["response_text"]
+        assert "Alice" in text
+        assert "Budget review" in text
+        assert "RazorClub" not in text
+
+    @pytest.mark.asyncio
+    async def test_multi_intent_query_uses_the_connected_mailbox(self):
+        from packages.shared.email_connector import EmailMessage
+
+        messages = [
+            EmailMessage(
+                id="m1",
+                from_addr="Alice <alice@test.com>",
+                subject="Budget review",
+                is_read=False,
+            )
+        ]
+        pipeline = ProactiveCallPipeline(
+            hub=FakeHub(),
+            gmail=FakeGmail(connected=True, messages=messages),
+        )
+        pipeline._schedule.trigger_hours = [datetime.now(UTC).hour]
+        call_id = await pipeline.tick()
+
+        result = await pipeline.handle_phone_message(
+            call_id, "what emails do I have, any texts?"
+        )
+        text = result["response_text"]
+        assert "Alice" in text
+        assert "Budget review" in text
+        assert "RazorClub" not in text
+        assert "Disha" not in text
+
 
 # ── CallSession ──────────────────────────────────────────────────────────────
 
@@ -343,10 +414,13 @@ class TestDrivingWorkflow:
         pipeline = ProactiveCallPipeline(hub=hub, gmail=FakeGmail(connected=False))
         session = await pipeline._start_call("drive_01", driving_scenario=True)
 
-        # 1. Spoken greeting
-        assert "Mr Chandragiri" in session.spoken_text
+        # 1. Spoken greeting is composed from the digest, not a canned script
         assert "LUME" in session.spoken_text
-        assert "next phase" in session.spoken_text
+        assert "RazorClub" in session.spoken_text
+        assert "Disha" in session.spoken_text
+        assert "next phase" not in session.spoken_text
+        # Demo contacts are seeded only for the explicit driving scenario.
+        assert pipeline.contacts.count() == 3
 
         # 2. Turn 1: user confirms continuation and asks about mails & Disha
         turn1 = await pipeline.handle_phone_message(
@@ -358,7 +432,8 @@ class TestDrivingWorkflow:
         assert "meeting" in t1_resp
         assert "Disha" in t1_resp
         assert "reaching home" in t1_resp
-        assert "what do I reply" in t1_resp
+        assert "What would you like to do" in t1_resp
+        assert session.pending_actions[0]["description"].startswith("continue Project LUME")
 
         # 3. Turn 2: user replies with compound instruction
         turn2 = await pipeline.handle_phone_message(
@@ -367,7 +442,7 @@ class TestDrivingWorkflow:
         )
         t2_resp = turn2["response_text"]
         # No transports are connected, so both actions are prepared, not sent.
-        assert "prepared both actions" in t2_resp
+        assert "prepared 2 actions" in t2_resp
         assert "nothing was delivered" in t2_resp
         compound = turn2["action"]
         assert compound["type"] == "compound_prepare"
