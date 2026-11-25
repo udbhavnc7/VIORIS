@@ -74,6 +74,17 @@ class GatewaySocket {
     return 1 * _attempt; // 1s, 2s, ..., capped at 6s
   }
 
+  /// Send an outgoing message to the gateway.
+  Future<void> send(Map<String, dynamic> message) async {
+    final channel = _channel;
+    if (channel == null) return;
+    try {
+      channel.sink.add(jsonEncode(message));
+    } catch (_) {
+      // socket down — the gateway re-rings when it reconnects
+    }
+  }
+
   Future<void> dispose() async {
     _closed = true;
     await _sub?.cancel();

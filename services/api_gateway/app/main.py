@@ -17,6 +17,7 @@ JWT — the frontend never calls the task-runner directly.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import time
@@ -397,6 +398,70 @@ def get_pipeline():
 
 def _setup_hub_handlers(hub: WebSocketHub, pipeline) -> None:
     """Register message handlers on the hub for incoming phone commands."""
+
+    from .call_audio import CallAudioBuffer, base64_decode, float32_to_pcm16_bytes
+    from packages.shared.stt import WhisperSTT
+
+    audio_buffers: dict[str, CallAudioBuffer] = {}
+
+    stt_holder: list[WhisperSTT | None] = [None]
+
+    def _get_stt() -> WhisperSTT:
+        if stt_holder[0] is None:
+            stt_holder[0] = WhisperSTT()
+        return stt_holder[0]
+
+    def _get_tts():
+        from app.tts import get_tts
+
+        return get_tts()
+
+    async def _speak_and_push(call_id: str, result: dict) -> None:
+        """Push the call response to the phone, with Piper TTS audio if we have a voice."""
+        response_text = (result or {}).get("response_text")
+        if response_text:
+            await hub.send_to_phones({
+                "type": "voice_response",
+                "payload": {"call_id": call_id, "text": response_text},
+            })
+        if not response_text:
+            return
+        try:
+            tts = _get_tts()
+            for audio, rate in tts.synthesize(response_text):
+                data = base64.b64encode(float32_to_pcm16_bytes(audio)).decode("ascii")
+                await hub.send_to_phones({
+                    "type": "tts",
+                    "payload": {"call_id": call_id, "sample_rate": rate, "data": data},
+                })
+        except Exception as exc:  # noqa: BLE001 — TTS stays optional for now
+            logger.warning("TTS synthesis unavailable (text still shown): %s", exc)
+
+    async def handle_call_audio(msg: WSMessage) -> None:
+        """Phone streams 16kHz mono base64 PCM while the user speaks."""
+        call_id = str(msg.payload.get("call_id", ""))
+        if not call_id:
+            return
+        buffer = audio_buffers.setdefault(call_id, CallAudioBuffer())
+        audio = base64_decode(str(msg.payload.get("data", "")))
+        if audio is not None:
+            buffer.push(audio)
+
+    async def handle_audio_end(msg: WSMessage) -> None:
+        """User finished speaking: transcribe and feed the call pipeline."""
+        call_id = str(msg.payload.get("call_id", ""))
+        buffer = audio_buffers.pop(call_id, None)
+        if not call_id or buffer is None or not buffer.has_speech():
+            return
+        text = await asyncio.to_thread(_get_stt().transcribe, buffer.drain())
+        text = (text or "").strip()
+        if not text:
+            return
+        result = await pipeline.handle_phone_message(call_id, text)
+        await _speak_and_push(call_id, result)
+
+    hub.on("call_audio", handle_call_audio)
+    hub.on("audio_end", handle_audio_end)
 
     async def handle_voice(msg: WSMessage) -> None:
         """Phone sent a voice utterance during an active call."""

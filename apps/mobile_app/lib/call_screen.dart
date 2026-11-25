@@ -144,6 +144,22 @@ class _CallScreenState extends State<CallScreen> {
                       ),
                     ),
                     const SizedBox(width: 8),
+                    IconButton(
+                      tooltip: state.micActive ? 'Stop mic' : 'Mic (10b)',
+                      icon: Icon(
+                        Icons.mic,
+                        color: state.micActive ? Theme.of(context).colorScheme.primary : null,
+                      ),
+                      onPressed: state.callBusy || state.activeCallId == null
+                          ? null
+                          : () {
+                              if (state.micActive) {
+                                state.stopCallMic();
+                              } else {
+                                state.startCallMic(state.activeCallId!);
+                              }
+                            },
+                    ),
                     FilledButton(
                       onPressed: state.callBusy
                           ? null
@@ -177,7 +193,7 @@ class _CallScreenState extends State<CallScreen> {
                 ),
               const SizedBox(height: 12),
               Text(
-                'Replies are typed for now. Nothing is sent until you tap Send, and every action still goes through approval.',
+                'Tap the mic to speak, or Send to type. Every action still goes through approval.',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurface.withValues(alpha: 0.55),

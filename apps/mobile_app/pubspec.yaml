@@ -36,6 +36,11 @@ dependencies:
   web_socket_channel: ^2.4.2
   provider: ^6.1.2
 
+  # Bidirectional audio over WS (10b): mic capture + TTS playback
+  record: ^6.0.0
+  just_audio: ^0.9.44
+  path_provider: ^2.1.6
+
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8

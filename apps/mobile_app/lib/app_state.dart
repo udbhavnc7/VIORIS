@@ -4,7 +4,14 @@
 /// through `GatewayClient` (device JWT) and `GatewaySocket`.
 library;
 
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 
 import 'gateway_client.dart';
 import 'gateway_socket.dart';
@@ -35,6 +42,14 @@ class AppState extends ChangeNotifier {
   String? activeCallId;
   List<String> callTranscript = [];
   bool callBusy = false;
+
+  // 10b bidirectional audio over the paired socket.
+  bool micActive = false;
+  final List<List<int>> _ttsChunks = [];
+  int _ttsSampleRate = 16000;
+  AudioPlayer? _ttsPlayer;
+  AudioRecorder? _recorder;
+  StreamSubscription<Uint8List>? _recSub;
 
   GatewaySocket? _socket;
 
@@ -103,7 +118,107 @@ class AppState extends ChangeNotifier {
           notifyListeners();
         }
       }
+    } else if (event['type'] == 'tts') {
+      // Base64 PCM16 chunks from Piper (10b). Buffered until the reply ends.
+      final callId = payload['call_id'] as String?;
+      final data = payload['data'] as String?;
+      final sampleRate = (payload['sample_rate'] as num?)?.toInt() ?? 16000;
+      if (callId != null && callId == activeCallId && data != null) {
+        _ttsSampleRate = sampleRate;
+        final chunk = base64Decode(data);
+        if (chunk.isNotEmpty) _ttsChunks.add(chunk.toList());
+        schedulePlayback();
+      }
     }
+  }
+
+  /// Play the buffered TTS for the active call as one WAV file.
+  Future<void> schedulePlayback() async {
+    if (_ttsChunks.isEmpty) return;
+    final chunks = List<List<int>>.from(_ttsChunks);
+    _ttsChunks.clear();
+    final bytes = chunks.expand((c) => c).toList();
+    if (bytes.isEmpty) return;
+    try {
+      final dir = await getTemporaryDirectory();
+      final path = '${dir.path}/vioris_tts_${DateTime.now().microsecondsSinceEpoch}.wav';
+      await _writeWav(path, bytes, _ttsSampleRate);
+      final player = _ttsPlayer ??= AudioPlayer();
+      await player.stop();
+      await player.setFilePath(path);
+      await player.play();
+    } catch (e) {
+      debugPrint('TTS playback failed: $e');
+    }
+  }
+
+  Future<void> _writeWav(String path, List<int> pcm, int sampleRate) async {
+    // 16-bit mono WAV header + PCM
+    final byteLength = pcm.length;
+    final header = [0x52, 0x49, 0x46, 0x46]; // "RIFF"
+    header.addAll(_int32LE(byteLength + 36)); // chunk size
+    header.addAll([0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20]); // "WAVEfmt "
+    header.addAll(_int32LE(16)); // PCM chunk size
+    header.addAll([0x01, 0x00, 0x01, 0x00]); // PCM, mono
+    header.addAll(_int32LE(sampleRate));
+    header.addAll(_int32LE(sampleRate * 2)); // byte rate (16-bit mono)
+    header.addAll([0x02, 0x00, 0x10, 0x00, 0x64, 0x61, 0x74, 0x61]); // fmt + "data"
+    header.addAll(_int32LE(byteLength));
+    final file = File(path);
+    await file.writeAsBytes([...header, ...pcm], flush: true);
+  }
+
+  List<int> _int32LE(int value) {
+    final v = value & 0xFFFFFFFF;
+    return [v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF];
+  }
+
+  /// Start the mic over the paired socket during an active call (10b).
+  Future<void> startCallMic(String callId) async {
+    if (micActive || activeCallId != callId || session == null) return;
+    final recorder = AudioRecorder();
+    final ok = await recorder.hasPermission();
+    if (ok != true) {
+      debugPrint('Mic permission denied');
+      return;
+    }
+    try {
+      final stream = await recorder.startStream(const RecordConfig(sampleRate: 16000));
+      _recorder = recorder;
+      micActive = true;
+      notifyListeners();
+      _recSub = stream.listen((chunk) {
+        _socket?.send({
+          'type': 'call_audio',
+          'payload': {
+            'call_id': callId,
+            'sample_rate': 16000,
+            'data': base64Encode(chunk.toList()),
+          },
+        });
+      });
+    } catch (e) {
+      debugPrint('Mic start failed: $e');
+    }
+  }
+
+  Future<void> stopCallMic() async {
+    final sub = _recSub;
+    final recorder = _recorder;
+    _recSub = null;
+    _recorder = null;
+    micActive = false;
+    notifyListeners();
+    try {
+      await sub?.cancel();
+      await recorder?.cancel();
+    } catch (e) {
+      debugPrint('Mic stop failed: $e');
+    }
+    await _socket?.send({
+      'type': 'audio_end',
+      'payload': {'call_id': activeCallId},
+    });
   }
 
   Future<void> refreshAll() async {
@@ -263,6 +378,7 @@ class AppState extends ChangeNotifier {
       if (spoken.isNotEmpty && !callTranscript.contains(spoken)) {
         callTranscript.add(spoken);
       }
+      await startCallMic(call.callId); // 10b: stream speech over WS
     } on GatewayException catch (e) {
       error = e.message;
     } finally {
@@ -312,6 +428,11 @@ class AppState extends ChangeNotifier {
     callBusy = true;
     notifyListeners();
     try {
+      await stopCallMic();
+      await _ttsPlayer?.stop();
+      await _ttsPlayer?.dispose();
+      _ttsPlayer = null;
+      _ttsChunks.clear();
       await _client.endCall(jwt, callId);
     } on GatewayException catch (e) {
       error = e.message;
@@ -327,6 +448,8 @@ class AppState extends ChangeNotifier {
   @override
   void dispose() {
     _socket?.dispose();
+    _recSub?.cancel();
+    _recorder?.cancel();
     super.dispose();
   }
 }
