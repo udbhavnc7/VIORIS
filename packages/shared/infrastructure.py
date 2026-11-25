@@ -1,6 +1,7 @@
 """Infrastructure — Celery, migrations, Tailscale, LLM fallbacks."""
 
 import json
+import logging
 import os
 import subprocess
 import time
@@ -10,6 +11,8 @@ from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # --- Phase 9.1: Celery + Redis Task Queue ---
@@ -138,11 +141,33 @@ class Migration:
             self.checksum = hashlib.sha256(self.up_sql.encode()).hexdigest()[:8]
 
 
-class MigrationRunner:
-    """Tracks and applies database migrations."""
+def _run_sql(sql: str, db_url: str) -> None:
+    """Execute one statement against PostgreSQL using asyncpg."""
+    import asyncio
 
-    def __init__(self, db_url: Optional[str] = None):
+    import asyncpg
+
+    async def _run():
+        async with asyncpg.connect(db_url) as conn:
+            await conn.execute(sql)
+
+    asyncio.run(_run())
+
+
+class MigrationRunner:
+    """Tracks and applies database migrations.
+
+    Real execution happens through `_run_sql` (asyncpg); tests can inject a
+    `connector` callable instead.
+    """
+
+    def __init__(self, db_url: Optional[str] = None, connector: Optional[Callable[[str], None]] = None):
         self.db_url = db_url or os.getenv("VIORIS_DB_URL", "postgresql://localhost:5432/vioris")
+        # Execution is real when a connector is given or the env points at a
+        # Postgres; without either, apply()/rollback() keep the in-memory stub
+        # used by existing callers/tests.
+        self._db_enabled = bool(connector) or bool(os.getenv("VIORIS_DB_URL"))
+        self._connector = connector
         self.migrations_dir = Path("migrations")
         self._applied: dict[str, Migration] = {}
         self._pending: list[Migration] = []
@@ -170,18 +195,41 @@ class MigrationRunner:
         applied_versions = set(self._applied.keys())
         return [m for m in self.load_migrations() if m.version not in applied_versions]
 
+    def _execute(self, sql: str) -> None:
+        if self._connector is not None:
+            self._connector(sql)
+        elif self.db_url and self._db_enabled:
+            _run_sql(sql, self.db_url)
+
     def apply(self, migration: Migration) -> bool:
-        try:
-            self._applied[migration.version] = migration
+        if migration.version in self._applied:
             return True
-        except Exception:
+        try:
+            self._execute(migration.up_sql)
+        except Exception as exc:  # noqa: BLE001 — don't crash the caller on a bad migration
+            logger.error("failed to apply migration %s: %s", migration.version, exc)
             return False
+        self._applied[migration.version] = migration
+        return True
 
     def rollback(self, migration: Migration) -> bool:
-        if migration.version in self._applied:
-            del self._applied[migration.version]
-            return True
-        return False
+        if migration.version not in self._applied:
+            return False
+        if migration.down_sql:
+            try:
+                self._execute(migration.down_sql)
+            except Exception as exc:  # noqa: BLE001 — rollback is best-effort
+                logger.error("failed to rollback migration %s: %s", migration.version, exc)
+        del self._applied[migration.version]
+        return True
+
+    def run_pending(self) -> list[str]:
+        """Apply every pending migration, returning the versions that applied."""
+        applied = []
+        for migration in self.get_pending():
+            if self.apply(migration):
+                applied.append(migration.version)
+        return applied
 
     def current_version(self) -> Optional[str]:
         if not self._applied:

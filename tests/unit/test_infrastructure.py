@@ -141,6 +141,51 @@ class TestMigrationRunner:
         runner = MigrationRunner()
         assert runner.current_version() is None
 
+    def test_apply_executes_up_sql_when_connector_given(self):
+        executed = []
+        runner = MigrationRunner(connector=executed.append)
+        m = Migration(version="001", name="init", up_sql="CREATE TABLE t1 (id INT);", down_sql="DROP TABLE t1;")
+        assert runner.apply(m) is True
+        assert executed == ["CREATE TABLE t1 (id INT);"]
+        assert runner.current_version() == "001"
+
+    def test_apply_returns_false_on_execution_error(self):
+        def boom(_sql):
+            raise RuntimeError("db down")
+
+        runner = MigrationRunner(connector=boom)
+        m = Migration(version="001", name="init", up_sql="x", down_sql="y")
+        assert runner.apply(m) is False
+        assert runner.current_version() is None
+
+    def test_apply_is_idempotent_for_same_version(self):
+        executed = []
+        runner = MigrationRunner(connector=executed.append)
+        m = Migration(version="001", name="init", up_sql="CREATE TABLE t1 (id INT);", down_sql="DROP TABLE t1;")
+        runner.apply(m)
+        runner.apply(m)
+        assert executed == ["CREATE TABLE t1 (id INT);"]
+
+    def test_rollback_executes_down_sql(self):
+        executed = []
+        runner = MigrationRunner(connector=executed.append)
+        m = Migration(version="001", name="init", up_sql="CREATE TABLE t1 (id INT);", down_sql="DROP TABLE t1;")
+        runner.apply(m)
+        assert runner.rollback(m) is True
+        assert executed[-1] == "DROP TABLE t1;"
+        assert runner.current_version() is None
+
+    def test_run_pending_applies_all_pending(self, tmp_path):
+        executed = []
+        runner = MigrationRunner(connector=executed.append)
+        runner.migrations_dir = tmp_path / "migrations"
+        (runner.migrations_dir).mkdir()
+        for v in ("001", "002"):
+            (runner.migrations_dir / f"{v}_v.sql").write_text(f"-- up\n{v}_sql")
+        applied = runner.run_pending()
+        assert applied == ["001", "002"]
+        assert runner.get_pending() == []
+
 
 # --- Phase 9.3: Tailscale Tests ---
 
