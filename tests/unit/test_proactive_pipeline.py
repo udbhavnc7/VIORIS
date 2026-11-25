@@ -3,7 +3,7 @@
 import asyncio
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -70,6 +70,7 @@ class FakeGmail:
 # ── imports ──────────────────────────────────────────────────────────────────
 
 from packages.shared.call_experience import RingSource
+from packages.shared.call_triggers import CallTriggerStore
 from packages.shared.contacts import Contact, ContactBook
 from packages.shared.proactive_pipeline import (
     CallSession,
@@ -491,3 +492,74 @@ class TestDrivingWorkflow:
         # 3. User finishes
         turn3 = await pipeline.handle_phone_message("drive_02", "bye")
         assert turn3["digest_status"] == "completed"
+
+
+# ── user-defined call triggers ───────────────────────────────────────────────
+
+
+class TestUserCallTriggers:
+    @pytest.mark.asyncio
+    async def test_time_trigger_starts_call_and_marks_fired(self, tmp_path):
+        fixed_now = datetime(2026, 9, 17, 19, 1, tzinfo=UTC)
+        store = CallTriggerStore(tmp_path / "triggers.json")
+        hub = FakeHub()
+        pipeline = ProactiveCallPipeline(
+            hub=hub, gmail=FakeGmail(connected=False), trigger_store=store
+        )
+        # Keep the daily digest out of the way so this is definitely a user trigger.
+        pipeline._schedule.trigger_hours = [0]
+
+        with patch("packages.shared.call_triggers._now", return_value=fixed_now):
+            trigger = store.create(kind="time", at="19:00", label="Evening check-in")
+            call_id = await pipeline.tick()
+
+        assert call_id is not None
+        assert hub.messages[0]["payload"]["reason"] == "Evening check-in"
+        assert store.get(trigger.trigger_id).last_fired_at is not None
+        assert pipeline._schedule.last_digest is None  # user trigger didn't consume it
+
+    @pytest.mark.asyncio
+    async def test_task_trigger_adds_completion_to_digest(self, tmp_path):
+        fixed_now = datetime(2026, 9, 17, 19, 1, tzinfo=UTC)
+        store = CallTriggerStore(tmp_path / "triggers.json")
+        hub = FakeHub()
+        pipeline = ProactiveCallPipeline(
+            hub=hub, gmail=FakeGmail(connected=False), trigger_store=store
+        )
+        pipeline._schedule.trigger_hours = [0]
+        task = {
+            "task_id": "t7",
+            "request": "Deploy the new build",
+            "status": "completed",
+            "updated_at": (fixed_now + timedelta(minutes=1)).isoformat(),
+        }
+
+        with patch("packages.shared.call_triggers._now", return_value=fixed_now):
+            trigger = store.create(kind="task_completed", match="deploy")
+            call_id = await pipeline.tick(completed_tasks=[task])
+
+        assert call_id is not None
+        session = pipeline.get_session(call_id)
+        assert session.digest.items[0].reference_id == "t7"
+        assert "Deploy the new build" in session.digest.items[0].summary
+        assert "Task completed" in hub.messages[0]["payload"]["reason"]
+        assert store.get(trigger.trigger_id).fired_task_ids == ["t7"]
+
+    @pytest.mark.asyncio
+    async def test_failed_call_is_not_marked_fired(self, tmp_path):
+        fixed_now = datetime(2026, 9, 17, 19, 1, tzinfo=UTC)
+        store = CallTriggerStore(tmp_path / "triggers.json")
+        pipeline = ProactiveCallPipeline(
+            hub=FakeHub(), gmail=FakeGmail(connected=False), trigger_store=store
+        )
+        pipeline._schedule.trigger_hours = [0]
+
+        with patch("packages.shared.call_triggers._now", return_value=fixed_now):
+            trigger = store.create(kind="time", at="19:00")
+            with patch.object(
+                pipeline, "_start_call", new=AsyncMock(side_effect=RuntimeError("no phone"))
+            ):
+                with pytest.raises(RuntimeError, match="no phone"):
+                    await pipeline.tick()
+
+        assert store.get(trigger.trigger_id).last_fired_at is None

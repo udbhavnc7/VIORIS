@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { api, formatError, type CallSession } from "../lib/api";
+import {
+  api,
+  formatError,
+  type CallSession,
+  type CallTrigger,
+  type CallTriggerKind,
+} from "../lib/api";
 import { clockTime, relativeTime, titleCase } from "../lib/format";
 import { useData } from "../state/store";
 import { PageHeader } from "../components/EmptyState";
@@ -44,6 +50,12 @@ export function Call() {
   const { push } = useToast();
 
   const [calls, setCalls] = useState<CallSession[]>([]);
+  const [triggers, setTriggers] = useState<CallTrigger[]>([]);
+  const [triggerKind, setTriggerKind] = useState<CallTriggerKind>("time");
+  const [triggerAt, setTriggerAt] = useState("19:00");
+  const [triggerMatch, setTriggerMatch] = useState("");
+  const [triggerLabel, setTriggerLabel] = useState("");
+  const [triggerOneShot, setTriggerOneShot] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("none");
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -66,6 +78,18 @@ export function Call() {
     const timer = window.setInterval(() => void loadCalls(), 10_000);
     return () => window.clearInterval(timer);
   }, [loadCalls]);
+
+  const loadTriggers = useCallback(async () => {
+    try {
+      setTriggers(await api.callTriggers());
+    } catch {
+      setTriggers([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadTriggers();
+  }, [loadTriggers]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -97,6 +121,40 @@ export function Call() {
       await loadCalls();
     } catch (err) {
       push({ title: "Could not start a call", message: formatError(err), tone: "bad" });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const addTrigger = async () => {
+    setBusy("add-trigger");
+    try {
+      await api.createCallTrigger({
+        kind: triggerKind,
+        label: triggerLabel,
+        at: triggerKind === "time" ? triggerAt : undefined,
+        match: triggerKind === "task_completed" ? triggerMatch : undefined,
+        one_shot: triggerOneShot,
+      });
+      setTriggerLabel("");
+      setTriggerMatch("");
+      setTriggerOneShot(false);
+      await loadTriggers();
+      push({ title: "Trigger added", message: "Vioris will call when it next checks.", tone: "ok" });
+    } catch (err) {
+      push({ title: "Could not add trigger", message: formatError(err), tone: "bad" });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeTrigger = async (trigger: CallTrigger) => {
+    setBusy(`delete-${trigger.trigger_id}`);
+    try {
+      await api.deleteCallTrigger(trigger.trigger_id);
+      await loadTriggers();
+    } catch (err) {
+      push({ title: "Could not delete trigger", message: formatError(err), tone: "bad" });
     } finally {
       setBusy(null);
     }
@@ -162,7 +220,7 @@ export function Call() {
         actions={
           <button type="button" className="btn btn-primary" onClick={() => void trigger()} disabled={busy !== null}>
             {busy === "trigger" ? <span className="spinner" aria-hidden="true" /> : <Icon name="phone" size={15} />}
-            Trigger a test call
+            Trigger a demo call
           </button>
         }
       />
@@ -206,7 +264,7 @@ export function Call() {
                     ? status === "ringing"
                       ? "Answer to hear the opening digest, then reply in your own words."
                       : "Send an utterance below to continue this session."
-                    : "Trigger a test call to push a ring to authenticated phones and open the same session here."}
+                    : "Trigger a demo call to push a ring to authenticated phones and open the same session here."}
                 </p>
                 {active && status === "ringing" ? (
                   <button type="button" className="btn btn-primary" onClick={() => void speak()} disabled={busy !== null}>
@@ -278,7 +336,7 @@ export function Call() {
           ) : (
             <div className="call-idle-actions">
               <button type="button" className="btn btn-primary" onClick={() => void trigger()} disabled={busy !== null}>
-                <Icon name="phone" size={15} /> Trigger a test call
+                <Icon name="phone" size={15} /> Trigger a demo call
               </button>
               <span>Nothing is dialed on its own in v1.</span>
             </div>
@@ -324,12 +382,127 @@ export function Call() {
           <section className="panel">
             <div className="section-head">
               <div>
+                <h2>Call triggers</h2>
+                <p>Your own reasons for Vioris to call.</p>
+              </div>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Refresh call triggers"
+                onClick={() => void loadTriggers()}
+              >
+                <Icon name="refresh" size={15} />
+              </button>
+            </div>
+            {triggers.length === 0 ? (
+              <p className="rail-empty">No triggers yet. Add one below.</p>
+            ) : (
+              <ul className="trigger-list">
+                {triggers.map((trigger) => (
+                  <li key={trigger.trigger_id} className="trigger-item">
+                    <div>
+                      <strong>
+                        {trigger.label ||
+                          (trigger.kind === "time"
+                            ? `Every day at ${trigger.at}`
+                            : `When “${trigger.match}” finishes`)}
+                      </strong>
+                      <span>
+                        {trigger.one_shot ? "One-shot · " : ""}
+                        {trigger.last_fired_at
+                          ? `last fired ${relativeTime(trigger.last_fired_at)}`
+                          : "not fired yet"}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      aria-label={`Delete trigger ${trigger.trigger_id}`}
+                      onClick={() => void removeTrigger(trigger)}
+                      disabled={busy !== null}
+                    >
+                      <Icon name="trash" size={14} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="trigger-form">
+              <div className="field-row">
+                <label className="field">
+                  <span>When</span>
+                  <select
+                    value={triggerKind}
+                    onChange={(event) => setTriggerKind(event.target.value as CallTriggerKind)}
+                  >
+                    <option value="time">At a time</option>
+                    <option value="task_completed">A task finishes</option>
+                  </select>
+                </label>
+                {triggerKind === "time" ? (
+                  <label className="field">
+                    <span>Time</span>
+                    <input
+                      type="time"
+                      value={triggerAt}
+                      onChange={(event) => setTriggerAt(event.target.value)}
+                    />
+                  </label>
+                ) : (
+                  <label className="field">
+                    <span>Task contains</span>
+                    <input
+                      value={triggerMatch}
+                      placeholder="e.g. deploy"
+                      onChange={(event) => setTriggerMatch(event.target.value)}
+                    />
+                  </label>
+                )}
+              </div>
+              <label className="field">
+                <span>Label (optional)</span>
+                <input
+                  value={triggerLabel}
+                  placeholder="Check in in the evening"
+                  maxLength={120}
+                  onChange={(event) => setTriggerLabel(event.target.value)}
+                />
+              </label>
+              <label className="switch-row">
+                <input
+                  type="checkbox"
+                  checked={triggerOneShot}
+                  onChange={(event) => setTriggerOneShot(event.target.checked)}
+                />
+                <span className="switch" aria-hidden="true" />
+                <span>
+                  <strong>Call once only</strong>
+                  <em>Otherwise the trigger stays active until you delete it.</em>
+                </span>
+              </label>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => void addTrigger()}
+                disabled={
+                  busy !== null ||
+                  (triggerKind === "time" ? !triggerAt : !triggerMatch.trim())
+                }
+              >
+                <Icon name="plus" size={14} /> Add trigger
+              </button>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-head">
+              <div>
                 <h2>Ground rules</h2>
                 <p>What this interface will not do.</p>
               </div>
             </div>
             <ul className="plain-list">
-              <li>It does not dial anyone. Proactive calls are scheduled digests in v1.</li>
+              <li>It does not dial anyone. Triggers open an in-app call, not a phone call.</li>
               <li>It does not synthesize audio here; the phone owns that surface.</li>
               <li>It does not send a message behind an approval gate.</li>
               <li>It does not keep a transcript after a gateway restart.</li>
