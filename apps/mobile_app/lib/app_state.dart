@@ -30,6 +30,12 @@ class AppState extends ChangeNotifier {
   Uint8List? remoteFrame;
   bool remoteRefreshing = false;
 
+  // In-app call state (Phase 8.5). Text-first: audio stays on the phone.
+  CallRing? incomingCall;
+  String? activeCallId;
+  List<String> callTranscript = [];
+  bool callBusy = false;
+
   GatewaySocket? _socket;
 
   GatewayClient get client => _client;
@@ -77,6 +83,26 @@ class AppState extends ChangeNotifier {
         event['type'] == 'rejected' ||
         event['type'] == 'stopped_all') {
       refreshAll();
+    }
+
+    final payload = event['payload'] as Map<String, dynamic>? ?? const {};
+    if (event['type'] == 'ring') {
+      final ring = CallRing.fromJson(payload);
+      if (ring.callId.isNotEmpty) {
+        incomingCall = ring;
+        activeCallId = null;
+        callTranscript = [];
+        notifyListeners();
+      }
+    } else if (event['type'] == 'digest' || event['type'] == 'voice_response') {
+      final callId = payload['call_id'] as String?;
+      if (callId != null && callId == (activeCallId ?? incomingCall?.callId)) {
+        final text = payload['text'] as String? ?? '';
+        if (text.isNotEmpty && !callTranscript.contains(text)) {
+          callTranscript.add(text);
+          notifyListeners();
+        }
+      }
     }
   }
 
@@ -219,6 +245,83 @@ class AppState extends ChangeNotifier {
       error = e.message;
     }
     notifyListeners();
+  }
+
+  // ── In-app calls (Phase 8.5) ────────────────────────────────────────────
+
+  /// Answer the incoming call and pull the opening digest. The gateway keeps
+  /// the session; this phone only renders it. No phone line is involved.
+  Future<void> answerCall() async {
+    final call = incomingCall;
+    final jwt = session?.jwt;
+    if (call == null || jwt == null || callBusy) return;
+    callBusy = true;
+    notifyListeners();
+    try {
+      final spoken = await _client.speakCall(jwt, call.callId);
+      activeCallId = call.callId;
+      if (spoken.isNotEmpty && !callTranscript.contains(spoken)) {
+        callTranscript.add(spoken);
+      }
+    } on GatewayException catch (e) {
+      error = e.message;
+    } finally {
+      callBusy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Speak one turn into the active call. Replies stay text until local audio
+  /// streaming is wired; nothing is sent without this explicit tap.
+  Future<void> sendCallMessage(String text) async {
+    final jwt = session?.jwt;
+    final callId = activeCallId;
+    final message = text.trim();
+    if (jwt == null || callId == null || message.isEmpty || callBusy) return;
+    final payload = 'You: $message';
+    if (callTranscript.contains(payload)) return; // idempotent tap
+    callBusy = true;
+    notifyListeners();
+    try {
+      final reply = await _client.callMessage(jwt, callId, message);
+      callTranscript.add(payload);
+      if (reply.isNotEmpty && !callTranscript.contains(reply)) {
+        callTranscript.add(reply);
+      }
+    } on GatewayException catch (e) {
+      error = e.message;
+    } finally {
+      callBusy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Answer or decline: both close the same gateway session.
+  Future<void> endCall() async {
+    final jwt = session?.jwt;
+    final callId = activeCallId ?? incomingCall?.callId;
+    if (callId == null || callBusy) return;
+    if (jwt == null) {
+      // No route to the gateway: still dismiss the ring locally.
+      incomingCall = null;
+      activeCallId = null;
+      callTranscript = [];
+      notifyListeners();
+      return;
+    }
+    callBusy = true;
+    notifyListeners();
+    try {
+      await _client.endCall(jwt, callId);
+    } on GatewayException catch (e) {
+      error = e.message;
+    } finally {
+      incomingCall = null;
+      activeCallId = null;
+      callTranscript = [];
+      callBusy = false;
+      notifyListeners();
+    }
   }
 
   @override

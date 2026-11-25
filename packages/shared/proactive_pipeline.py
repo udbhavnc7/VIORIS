@@ -393,6 +393,17 @@ class ProactiveCallPipeline:
 
         return session.spoken_text
 
+    async def handle_call_end(self, call_id: str) -> bool:
+        """End a call from the phone. Clears trust and call-scoped context."""
+        session = self._sessions.get(call_id)
+        if not session:
+            return False
+        session.status = DigestStatus.COMPLETED
+        session.ended_at = time.time()
+        self._call_experience.end_call()
+        self.dialogue.end_call()
+        return True
+
     # ── handle phone sending a voice message ──────────────────────────────
 
     async def handle_phone_message(
@@ -464,6 +475,7 @@ class ProactiveCallPipeline:
             session.status = DigestStatus.COMPLETED
             session.ended_at = time.time()
             self._call_experience.end_call()
+            self.dialogue.end_call()
             return {
                 "response_text": "Talk to you later.",
                 "action": None,

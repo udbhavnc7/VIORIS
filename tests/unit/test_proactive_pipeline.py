@@ -546,6 +546,19 @@ class TestUserCallTriggers:
         assert store.get(trigger.trigger_id).fired_task_ids == ["t7"]
 
     @pytest.mark.asyncio
+    async def test_handle_call_end_completes_and_clears_trust(self):
+        hub = FakeHub()
+        pipeline = ProactiveCallPipeline(hub=hub, gmail=FakeGmail(connected=False))
+        pipeline._schedule.trigger_hours = [datetime.now(UTC).hour]
+        call_id = await pipeline.tick()
+        assert pipeline.dialogue.trust.session is not None
+
+        assert await pipeline.handle_call_end(call_id) is True
+        assert pipeline.get_session(call_id).status == DigestStatus.COMPLETED
+        assert pipeline.dialogue.trust.session is None
+        assert await pipeline.handle_call_end("missing") is False
+
+    @pytest.mark.asyncio
     async def test_failed_call_is_not_marked_fired(self, tmp_path):
         fixed_now = datetime(2026, 9, 17, 19, 1, tzinfo=UTC)
         store = CallTriggerStore(tmp_path / "triggers.json")

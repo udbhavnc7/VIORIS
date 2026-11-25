@@ -8,6 +8,7 @@ import '../app_state.dart';
 import '../widgets.dart';
 import 'activity_timeline_screen.dart';
 import 'approval_queue_screen.dart';
+import 'call_screen.dart';
 import 'home_screen.dart';
 import 'remote_control_screen.dart';
 
@@ -31,29 +32,36 @@ class _MainShellState extends State<MainShell> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
-    return Scaffold(
-      body: IndexedStack(index: _index, children: _screens),
-      bottomNavigationBar: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Persistent emergency control — present on every tab.
-          if (state.paired)
-            StopEverythingBar(
-              busy: state.stopInFlight,
-              onPressed: _confirmStop,
-            ),
-          NavigationBar(
-            selectedIndex: _index,
-            onDestinationSelected: (i) => setState(() => _index = i),
-            destinations: const [
-              NavigationDestination(icon: Icon(Icons.home), label: 'Home'),
-              NavigationDestination(icon: Icon(Icons.hourglass_top), label: 'Approvals'),
-              NavigationDestination(icon: Icon(Icons.history), label: 'Activity'),
-              NavigationDestination(icon: Icon(Icons.present_to_all), label: 'Remote'),
+    return Stack(
+      children: [
+        Scaffold(
+          body: IndexedStack(index: _index, children: _screens),
+          bottomNavigationBar: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Persistent emergency control — present on every tab.
+              if (state.paired)
+                StopEverythingBar(
+                  busy: state.stopInFlight,
+                  onPressed: _confirmStop,
+                ),
+              NavigationBar(
+                selectedIndex: _index,
+                onDestinationSelected: (i) => setState(() => _index = i),
+                destinations: const [
+                  NavigationDestination(icon: Icon(Icons.home), label: 'Home'),
+                  NavigationDestination(icon: Icon(Icons.hourglass_top), label: 'Approvals'),
+                  NavigationDestination(icon: Icon(Icons.history), label: 'Activity'),
+                  NavigationDestination(icon: Icon(Icons.present_to_all), label: 'Remote'),
+                ],
+              ),
             ],
           ),
-        ],
-      ),
+        ),
+        // An incoming ring takes over the whole phone until answered/declined.
+        if (state.incomingCall != null)
+          const Positioned.fill(child: CallScreen()),
+      ],
     );
   }
 

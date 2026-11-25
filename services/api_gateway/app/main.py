@@ -436,10 +436,7 @@ def _setup_hub_handlers(hub: WebSocketHub, pipeline) -> None:
     async def handle_call_end(msg: WSMessage) -> None:
         """Phone ended the call."""
         call_id = msg.payload.get("call_id", "")
-        session = pipeline.get_session(call_id)
-        if session:
-            from packages.shared.proactive_pipeline import DigestStatus
-            session.status = DigestStatus.COMPLETED
+        await pipeline.handle_call_end(call_id)
 
     async def handle_approve(msg: WSMessage) -> None:
         """Phone approved an action."""
@@ -717,6 +714,20 @@ async def call_message(
     text = payload.get("text", "")
     result = await pipeline.handle_phone_message(call_id, text)
     return {"device": device.device_id, "call_id": call_id, **result}
+
+
+@app.post("/v1/call/{call_id}/end")
+async def end_call(
+    call_id: str, device: Device = Depends(_require_device)
+) -> dict:
+    """End a call from a phone, even if its WebSocket is unavailable."""
+    pipeline = get_pipeline()
+    ended = await pipeline.handle_call_end(call_id)
+    return {
+        "device": device.device_id,
+        "call_id": call_id,
+        "status": "completed" if ended else "not_found",
+    }
 
 
 @app.get("/v1/call/{call_id}/status")

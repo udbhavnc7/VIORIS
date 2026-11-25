@@ -190,6 +190,37 @@ class GatewayClient {
     return _decode(resp);
   }
 
+  // ── In-app calls (Phase 8.5) ────────────────────────────────────────────
+
+  /// Answer a proactive call. Returns the opening digest spoken by Vioris;
+  /// audio synthesis happens on the phone, not at the gateway.
+  Future<String> speakCall(String jwt, String callId) async {
+    final resp = await _client.post(
+      _uri('/v1/call/$callId/speak'),
+      headers: _headers(jwt: jwt),
+    );
+    return (_decode(resp)['spoken_text'] as String?) ?? '';
+  }
+
+  /// Send one utterance in an active call and return Vioris's reply.
+  Future<String> callMessage(String jwt, String callId, String text) async {
+    final resp = await _client.post(
+      _uri('/v1/call/$callId/message'),
+      headers: _headers(jwt: jwt),
+      body: jsonEncode({'text': text}),
+    );
+    return (_decode(resp)['response_text'] as String?) ?? '';
+  }
+
+  /// End a call over HTTP so the phone works even without a live socket.
+  Future<bool> endCall(String jwt, String callId) async {
+    final resp = await _client.post(
+      _uri('/v1/call/$callId/end'),
+      headers: _headers(jwt: jwt),
+    );
+    return (_decode(resp)['status'] as String?) == 'completed';
+  }
+
   Map<String, dynamic> _decode(http.Response resp) {
     Map<String, dynamic>? body;
     try {

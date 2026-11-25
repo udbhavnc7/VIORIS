@@ -142,3 +142,29 @@ class ActivityEvent {
         detail: (json['detail'] as Map<String, dynamic>?) ?? const {},
       );
 }
+
+/// An incoming in-app call pushed over the authenticated WebSocket.
+/// This is not a phone call: no telephony transport is involved.
+class CallRing {
+  const CallRing({
+    required this.callId,
+    required this.source,
+    required this.callerName,
+    this.reason = '',
+    this.digestPreview = '',
+  });
+
+  final String callId;
+  final String source;
+  final String callerName;
+  final String reason;
+  final String digestPreview;
+
+  factory CallRing.fromJson(Map<String, dynamic> json) => CallRing(
+        callId: (json['call_id'] as String?) ?? '',
+        source: (json['source'] as String?) ?? 'proactive',
+        callerName: (json['caller_name'] as String?) ?? 'Vioris',
+        reason: (json['reason'] as String?) ?? '',
+        digestPreview: (json['digest_preview'] as String?) ?? '',
+      );
+}
