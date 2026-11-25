@@ -129,6 +129,7 @@ class PermissionResult(BaseModel):
     tier: RiskTier
     confirmation_required: bool
     requires_second_factor: bool = False
+    verified_call_session: bool = False  # Execute actions proceed in a voiceprint-verified call
     cooldown_seconds: int = 0
     allowed: bool = True
     reason: str = ""

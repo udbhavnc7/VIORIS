@@ -35,6 +35,7 @@ from .call_triggers import CallTriggerStore, TriggerMatch
 from .contacts import Contact, ContactBook, relationship_phrases
 from .dialogue import DialogueOrchestrator, SplitCommand
 from .email_connector import GmailConnector
+from .permission_engine import PermissionEngine
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +263,9 @@ class ProactiveCallPipeline:
         #    No canned names or project scripts live in this path.
         self.dialogue.start_call()
         spoken_text = self._compose_digest_speech(items)
+        # Expose the call-scoped trust envelope to the permission engine so a
+        # voiceprint-verified Execute grant at pickup is honoured mid-call.
+        PermissionEngine.set_call_trust(self.dialogue.trust)
 
         # 4. Create session
         session = CallSession(
@@ -402,6 +406,7 @@ class ProactiveCallPipeline:
         session.ended_at = time.time()
         self._call_experience.end_call()
         self.dialogue.end_call()
+        PermissionEngine.set_call_trust(None)
         return True
 
     # ── handle phone sending a voice message ──────────────────────────────
@@ -476,6 +481,7 @@ class ProactiveCallPipeline:
             session.ended_at = time.time()
             self._call_experience.end_call()
             self.dialogue.end_call()
+            PermissionEngine.set_call_trust(None)
             return {
                 "response_text": "Talk to you later.",
                 "action": None,

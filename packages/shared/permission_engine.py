@@ -18,6 +18,7 @@ import numpy as np
 from packages.shared.schemas import PermissionResult, RiskTier, ToolRegistration
 
 if TYPE_CHECKING:
+    from packages.shared.dialogue import CallSessionTrust
     from packages.shared.voiceprint import VoiceprintManager
 
 logger = logging.getLogger(__name__)
@@ -102,10 +103,33 @@ class PermissionEngine:
     # Voiceprint manager injected at startup for second-factor verification
     _voiceprint: ClassVar[VoiceprintManager | None] = None
 
+    # Call-session trust envelope: the dialogue layer's CallSessionTrust is
+    # registered here when a call starts so the engine can honour an Execute
+    # grant that a verified voiceprint at pickup produced.
+    _call_trust: ClassVar[CallSessionTrust | None] = None
+
     @classmethod
     def set_voiceprint(cls, vp: VoiceprintManager | None) -> None:
         """Inject the voiceprint manager for Critical-tier second-factor checks."""
         cls._voiceprint = vp
+
+    @classmethod
+    def set_call_trust(cls, trust: CallSessionTrust | None) -> None:
+        """Set (or clear) the active call-session trust envelope.
+
+        Called by the proactive pipeline when a call starts/ends.
+        """
+        cls._call_trust = trust
+
+    @classmethod
+    def get_call_trust(cls) -> CallSessionTrust | None:
+        return cls._call_trust
+
+    @classmethod
+    def _verified_call_session(cls) -> bool:
+        """True when a call is active and voiceprint verified at pickup."""
+        trust = cls._call_trust
+        return bool(trust is not None and getattr(trust, "can_execute", lambda: False)())
 
     @classmethod
     def classify(
@@ -132,6 +156,7 @@ class PermissionEngine:
             tier=reg.tier,
             confirmation_required=reg.confirmation_required,
             requires_second_factor=reg.tier == RiskTier.CRITICAL,
+            verified_call_session=cls._verified_call_session(),
             cooldown_seconds=5 if reg.tier == RiskTier.CRITICAL else 0,
             allowed=True,
             reason=f"Tool '{tool_name}' classified as '{reg.tier.value}'",
@@ -179,6 +204,7 @@ class PermissionEngine:
     def reset(cls) -> None:
         """Reset the registry. ONLY for use in tests."""
         cls._registry.clear()
+        cls._call_trust = None
         cls._frozen = False
 
 

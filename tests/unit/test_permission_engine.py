@@ -1,5 +1,6 @@
 import pytest
 
+from packages.shared.dialogue import CallSessionTrust
 from packages.shared.permission_engine import (
     PermissionEngine,
     UnknownToolError,
@@ -98,6 +99,63 @@ class TestClassification:
         assert result.confirmation_required is True
         assert result.requires_second_factor is True
         assert result.cooldown_seconds > 0
+
+
+class TestCallSessionTrustEnvelope:
+    """10k: the engine honours an Execute grant from a verified call session."""
+
+    @staticmethod
+    def _register_execute():
+        PermissionEngine.register(
+            ToolRegistration(
+                tool_name="test.send",
+                tier=RiskTier.EXECUTE,
+                confirmation_required=True,
+                description="Send",
+                diff_card_fields=["recipient", "content"],
+            )
+        )
+
+    @staticmethod
+    def _verified_trust() -> CallSessionTrust:
+        trust = CallSessionTrust(voiceprint_checker=lambda audio, sr: (True, "ok"))
+        trust.start_session()
+        assert trust.verify_voiceprint(None) == (True, "ok")
+        assert trust.can_execute()
+        return trust
+
+    def test_no_call_trust_means_not_verified(self):
+        self._register_execute()
+        assert PermissionEngine.classify("test.send").verified_call_session is False
+
+    def test_voiceprint_verified_session_is_exposed(self):
+        self._register_execute()
+        trust = self._verified_trust()
+        PermissionEngine.set_call_trust(trust)
+        try:
+            result = PermissionEngine.classify("test.send")
+            assert result.verified_call_session is True
+        finally:
+            PermissionEngine.set_call_trust(None)
+        assert PermissionEngine.classify("test.send").verified_call_session is False
+
+    def test_critical_still_requires_fresh_confirm_in_verified_session(self):
+        PermissionEngine.register(
+            ToolRegistration(
+                tool_name="test.pay",
+                tier=RiskTier.CRITICAL,
+                confirmation_required=True,
+                description="Pay",
+                diff_card_fields=["recipient", "amount"],
+            )
+        )
+        PermissionEngine.set_call_trust(self._verified_trust())
+        try:
+            result = PermissionEngine.classify("test.pay")
+            assert result.verified_call_session is True
+            assert result.requires_second_factor is True
+        finally:
+            PermissionEngine.set_call_trust(None)
 
 
 class TestFreeze:
