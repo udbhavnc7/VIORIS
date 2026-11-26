@@ -79,8 +79,14 @@ class TaskQueue:
                 except Exception as e:
                     self_inner.retry(exc=e, countdown=2 ** self_inner.request.retries)
 
-    def submit(self, task_name: str, *args, **kwargs) -> TaskResult:
-        task_id = hashlib.sha256(f"{task_name}{time.time()}".encode()).hexdigest()[:16]
+    def submit(self, task_name: str, *args, task_id: Optional[str] = None, **kwargs) -> TaskResult:
+        """Queue one task.
+
+        ``task_id`` may be supplied by a caller that already owns a durable id
+        (e.g. a task-runner step) so enqueueing is idempotent from the caller's
+        point of view. Otherwise a time-based id is generated.
+        """
+        task_id = task_id or hashlib.sha256(f"{task_name}{time.time()}".encode()).hexdigest()[:16]
         result = TaskResult(task_id=task_id, status=TaskStatus.PENDING)
         self._tasks[task_id] = result
 

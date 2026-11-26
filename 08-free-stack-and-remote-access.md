@@ -58,6 +58,8 @@ Tailscale replaces "the custom relay + mTLS" from the original architecture doc,
 ```
 LLM_PROVIDER=ollama
 VIORIS_LLM_FALLBACKS=0         # set to 1 only to allow hosted free-tier failover
+VIORIS_TASK_QUEUE=inline       # set to 'celery' to run task steps in a worker over local Redis
+VIORIS_REDIS_URL=redis://localhost:6379/0
 # GROQ_API_KEY=                # only read when VIORIS_LLM_FALLBACKS=1
 # OPENROUTER_API_KEY=
 # GEMINI_API_KEY=
@@ -68,6 +70,18 @@ WAKE_WORD_ENGINE=openwakeword
 TAILSCALE_LAPTOP_IP=100.x.x.x  # filled in after Tailscale setup
 GATEWAY_PORT=8420
 ```
+
+Background execution is opt-in. The default `inline` mode needs no broker. To
+use Celery over local Redis, set `VIORIS_TASK_QUEUE=celery` and start a worker:
+
+```
+celery -A services.task_runner.app.background:celery_app worker --loglevel=info
+```
+
+The worker re-opens the durable task store, so the frozen permission registry,
+the approval ledger and the hash-chained audit are all enforced in the worker
+process too. Approvals still gate Execute/Critical steps; queueing a task never
+approves one.
 
 ## 5. Honest Trade-offs of Going Fully Free
 

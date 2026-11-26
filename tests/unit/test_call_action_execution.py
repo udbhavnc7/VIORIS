@@ -174,6 +174,34 @@ class TestQueueThroughApprovalGate:
         assert all("approve" not in call[1] for call in runner.calls)
 
     @pytest.mark.asyncio
+    async def test_queued_run_polls_status_instead_of_enqueueing_again(self, runner):
+        runner.responses += [
+            (200, {"task_id": "t-44"}),
+            (200, {"ok": True}),
+            (
+                200,
+                {
+                    "queued": True,
+                    "task": {"task_id": "t-44", "status": "running", "steps": []},
+                },
+            ),
+            (200, {"task_id": "t-44", "status": "waiting_approval", "steps": []}),
+            (200, [{"approval_id": "a-10", "task_id": "t-44", "tool": "system.send_message"}]),
+        ]
+        outcome = await gw._execute_call_action("call-7", MESSAGE)
+
+        assert outcome["queued"] is True
+        assert outcome["approval_id"] == "a-10"
+        assert outcome["status"] == "waiting_approval"
+        assert [call[:2] for call in runner.calls] == [
+            ("POST", "http://127.0.0.1:8421/tasks"),
+            ("POST", "http://127.0.0.1:8421/tasks/t-44/start"),
+            ("POST", "http://127.0.0.1:8421/tasks/t-44/run"),
+            ("GET", "http://127.0.0.1:8421/tasks/t-44"),
+            ("GET", "http://127.0.0.1:8421/approvals"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_completed_task_reports_completion(self, runner):
         runner.responses += [
             (200, {"task_id": "t-43"}),

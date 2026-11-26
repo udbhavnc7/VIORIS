@@ -28,6 +28,7 @@ from packages.shared.schemas import RiskTier, TaskStep
 from packages.shared.second_factor import load_or_create_key
 from packages.shared.second_factor import verify as verify_second_factor
 
+from .background import dispatch_step
 from .manager import TaskManager
 
 
@@ -186,14 +187,24 @@ def _execute(step, task=None):
 
 @app.post("/tasks/{task_id}/run")
 def run_task(task_id: str) -> dict:
-    task, outcome = get_manager().run_next_step(task_id, _execute)
+    """Advance one task.
+
+    Inline mode runs one step and returns its outcome. Celery mode enqueues the
+    worker (which drains all runnable steps) and returns ``queued: true``; the
+    task status still comes from the durable manager, not from the broker.
+    """
+    dispatched = dispatch_step(task_id)
+    task = dispatched["task"]
+    outcome = dispatched.get("outcome")
+    step = outcome.step if outcome is not None else None
     return {
+        "queued": dispatched["queued"],
         "task": _task_dict(task),
         "step": {
-            "step_id": outcome.step.step_id if outcome.step else None,
-            "tool": outcome.step.tool if outcome.step else None,
-            "ok": outcome.ok,
-            "error": outcome.error,
+            "step_id": step.step_id if step else None,
+            "tool": step.tool if step else None,
+            "ok": bool(outcome and outcome.ok),
+            "error": dispatched.get("error") or (outcome.error if outcome else None),
         },
     }
 
@@ -303,13 +314,15 @@ def approve_approval(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     # Auto-run the armed step: "approve from your phone while the laptop is
     # out of sight" must actually FIRE the step. The step was re-armed from
-    # WAITING_APPROVAL to CREATED by approve(); run_next_step executes it with
-    # the real executor and continues until the next gate or completion.
-    task, _ = mgr.run_next_step(task.task_id, _execute)
+    # WAITING_APPROVAL to CREATED by approve(); dispatch re-checks the ledger
+    # in this process (inline) or in the worker (Celery mode).
+    dispatched = dispatch_step(task.task_id)
+    task = dispatched["task"]
     return {
         "approved": approval_id,
         "task_id": task.task_id,
         "status": task.status.value,
+        "queued": dispatched["queued"],
         "diff_card": approval.diff_card,
     }
 

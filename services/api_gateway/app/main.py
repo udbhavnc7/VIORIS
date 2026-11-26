@@ -583,15 +583,26 @@ async def _execute_call_action(call_id: str, action: dict) -> dict:
                 "queued": False,
             }
         await _local_task_request("POST", f"/tasks/{task_id}/start")
-        last: dict = {}
-        for _ in range(8):
-            last = await _local_task_request("POST", f"/tasks/{task_id}/run")
-            status = (last.get("task") or {}).get("status")
-            if status not in ("created", "running"):
-                break
-            steps = (last.get("task") or {}).get("steps") or []
-            if not any(s.get("status") == "created" for s in steps):
-                break
+        last = await _local_task_request("POST", f"/tasks/{task_id}/run")
+        if last.get("queued"):
+            # Celery mode: the worker drains runnable steps, so re-calling /run
+            # here would enqueue the same step twice. Poll the durable task
+            # instead until it reaches a gate or a terminal state.
+            for _ in range(40):
+                await asyncio.sleep(0.25)
+                polled = await _local_task_request("GET", f"/tasks/{task_id}")
+                last = {"task": polled}
+                if (polled or {}).get("status") not in ("created", "running"):
+                    break
+        else:
+            for _ in range(7):
+                status = (last.get("task") or {}).get("status")
+                if status not in ("created", "running"):
+                    break
+                steps = (last.get("task") or {}).get("steps") or []
+                if not any(s.get("status") == "created" for s in steps):
+                    break
+                last = await _local_task_request("POST", f"/tasks/{task_id}/run")
     except HTTPException as exc:
         return {"note": f"Could not queue that step: {exc.detail}", "queued": False}
 
