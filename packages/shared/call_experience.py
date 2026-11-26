@@ -151,6 +151,8 @@ class DigestItem:
         subject: str = "",
         channel: str = "",
         reference_id: str = "",
+        sender_email: str = "",
+        thread_id: str = "",
     ):
         self.item_type = item_type
         self.summary = summary
@@ -161,6 +163,8 @@ class DigestItem:
         self.subject = subject
         self.channel = channel
         self.reference_id = reference_id
+        self.sender_email = sender_email
+        self.thread_id = thread_id
 
     def to_dict(self) -> dict:
         return {
@@ -173,6 +177,8 @@ class DigestItem:
             "subject": self.subject,
             "channel": self.channel,
             "reference_id": self.reference_id,
+            "sender_email": self.sender_email,
+            "thread_id": self.thread_id,
         }
 
 

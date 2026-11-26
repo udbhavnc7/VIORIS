@@ -126,7 +126,14 @@ async def test_handler_failure_is_surfaced_not_silently_ignored():
     assert "Could not queue that step: transport offline" in result["response_text"]
 
 
-def _email_session(pipeline, *, message_id="msg-123", call_id="call-1"):
+def _email_session(
+    pipeline,
+    *,
+    message_id="msg-123",
+    thread_id="thread-9",
+    sender_email="disha@example.com",
+    call_id="call-1",
+):
     session = CallSession(call_id=call_id, source=RingSource.PROACTIVE)
     session.digest = ProactiveDigest(
         call_id=call_id,
@@ -140,6 +147,8 @@ def _email_session(pipeline, *, message_id="msg-123", call_id="call-1"):
                 subject="Re: Dinner",
                 channel="email",
                 reference_id=message_id,
+                sender_email=sender_email,
+                thread_id=thread_id,
             )
         ],
     )
@@ -236,6 +245,108 @@ async def test_confirmed_react_is_queued_through_the_handler():
         "task_id": "t-7",
         "approval_id": "a-1",
     }
+
+
+@pytest.mark.asyncio
+async def test_reply_prepares_an_email_reply_with_thread_and_recipient():
+    pipeline = _pipeline()
+    session = _email_session(pipeline)
+
+    result = await pipeline.handle_phone_message(
+        "call-1", "reply to Disha's email saying running late"
+    )
+
+    assert result["action"] is None
+    assert "It has not been sent" in result["response_text"]
+    assert session.pending_actions == [
+        {
+            "type": "reply",
+            "thread_id": "thread-9",
+            "message_id": "msg-123",
+            "to": "disha@example.com",
+            "subject": "Re: Dinner",
+            "body": "running late",
+            "status": "not_sent",
+            "description": "reply to Disha: 'running late' — not sent",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reply_to_this_email_targets_the_first_email():
+    pipeline = _pipeline()
+    session = _email_session(pipeline)
+
+    await pipeline.handle_phone_message("call-1", "reply to this email saying thanks")
+
+    assert session.pending_actions[0]["type"] == "reply"
+    assert session.pending_actions[0]["to"] == "disha@example.com"
+
+
+@pytest.mark.asyncio
+async def test_reply_without_a_thread_id_is_refused():
+    pipeline = _pipeline()
+    session = _email_session(pipeline, thread_id="")
+
+    result = await pipeline.handle_phone_message(
+        "call-1", "reply to Disha's email saying running late"
+    )
+
+    assert session.pending_actions == []
+    assert "thread id" in result["response_text"]
+    assert "Nothing was prepared" in result["response_text"]
+
+
+@pytest.mark.asyncio
+async def test_reply_to_an_unknown_sender_is_refused():
+    pipeline = _pipeline()
+    session = _email_session(pipeline)
+
+    result = await pipeline.handle_phone_message(
+        "call-1", "reply to Ravi's email saying hello"
+    )
+
+    assert session.pending_actions == []
+    assert "don't see an email from Ravi" in result["response_text"]
+
+
+@pytest.mark.asyncio
+async def test_bare_reply_to_a_contact_still_prepares_a_message():
+    pipeline = _pipeline()
+    pipeline.contacts.add(
+        Contact(name="Disha", email="disha@example.com", phone="+919876500001")
+    )
+    session = _email_session(pipeline)
+
+    await pipeline.handle_phone_message("call-1", "reply to Disha saying hi")
+
+    assert session.pending_actions[0]["type"] == "message"
+    assert session.pending_actions[0]["message"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_confirmed_reply_is_queued_through_the_handler():
+    calls = []
+
+    def handler(call_id, action):
+        calls.append(action)
+        return {
+            "note": "Queued as task t-8; waiting for approval.",
+            "task_id": "t-8",
+            "approval_id": "a-2",
+            "queued": True,
+        }
+
+    pipeline = _pipeline(on_action=handler)
+    _email_session(pipeline)
+    await pipeline.handle_phone_message(
+        "call-1", "reply to Disha's email saying running late"
+    )
+    result = await pipeline.handle_phone_message("call-1", "yes")
+
+    assert calls and calls[0]["type"] == "reply"
+    assert result["queued"] is True
+    assert result["approval_id"] == "a-2"
 
 
 @pytest.mark.asyncio

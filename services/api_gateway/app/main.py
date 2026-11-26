@@ -499,6 +499,31 @@ def _action_to_steps(action: dict) -> list[dict] | None:
                 ),
             }
         ]
+    if kind == "reply":
+        thread_id = str(action.get("thread_id") or "").strip()
+        to = str(action.get("to") or "").strip()
+        subject = str(action.get("subject") or "").strip()
+        body = str(action.get("body") or "").strip()
+        if not thread_id or not to or not subject or not body:
+            return None
+        return [
+            {
+                "agent": "gmail",
+                "tool": "gmail.send_reply",
+                "args": {
+                    "thread_id": thread_id,
+                    "message_id": str(action.get("message_id") or "").strip(),
+                    "to": to,
+                    "subject": subject,
+                    "body": body,
+                },
+                "reasoning": (
+                    "Confirmed during a call. Sending a reply is Execute-tier and "
+                    "irreversible once delivered, so the task runner pauses for "
+                    "explicit approval before anything leaves the laptop."
+                ),
+            }
+        ]
     # Resuming a task needs its task id, not just a spoken summary; open_app has
     # no reliable app-name mapping, and there is no send-new-mail tool (only
     # replies to an existing thread).

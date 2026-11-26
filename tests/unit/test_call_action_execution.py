@@ -59,6 +59,17 @@ REACT = {
     "description": "acknowledge on Disha's mail",
 }
 
+REPLY = {
+    "type": "reply",
+    "thread_id": "thread-9",
+    "message_id": "msg-123",
+    "to": "disha@example.com",
+    "subject": "Re: Dinner",
+    "body": "running late",
+    "status": "not_sent",
+    "description": "reply to Disha: 'running late' — not sent",
+}
+
 
 class TestActionMapping:
     def test_message_maps_to_registered_execute_tool(self):
@@ -85,6 +96,24 @@ class TestActionMapping:
         ]
         assert "approval" in steps[0]["reasoning"]
 
+    def test_reply_maps_to_registered_execute_tool(self):
+        steps = gw._action_to_steps(REPLY)
+        assert steps == [
+            {
+                "agent": "gmail",
+                "tool": "gmail.send_reply",
+                "args": {
+                    "thread_id": "thread-9",
+                    "message_id": "msg-123",
+                    "to": "disha@example.com",
+                    "subject": "Re: Dinner",
+                    "body": "running late",
+                },
+                "reasoning": steps[0]["reasoning"],
+            }
+        ]
+        assert "Execute-tier" in steps[0]["reasoning"]
+
     @pytest.mark.parametrize(
         "action",
         [
@@ -104,6 +133,10 @@ class TestActionMapping:
             {"type": "message", "contact": "Disha", "message": "  "},
             {"type": "react", "reaction": "acknowledge"},
             {"type": "react", "message_id": "msg-123", "reaction": "  "},
+            {"type": "reply", "to": "d@example.com", "subject": "Re: x", "body": "hi"},
+            {"type": "reply", "thread_id": "t", "subject": "Re: x", "body": "hi"},
+            {"type": "reply", "thread_id": "t", "to": "d@example.com", "body": "hi"},
+            {"type": "reply", "thread_id": "t", "to": "d@example.com", "subject": "Re: x"},
         ],
     )
     def test_incomplete_actions_are_refused(self, action):
@@ -188,6 +221,26 @@ class TestQueueThroughApprovalGate:
             "message_id": "msg-123",
             "reaction": "acknowledge",
         }
+        assert all("approve" not in call[1] for call in runner.calls)
+
+    @pytest.mark.asyncio
+    async def test_reply_creates_task_and_stops_at_gate(self, runner):
+        runner.responses += [
+            (200, {"task_id": "t-45"}),
+            (200, {"task_id": "t-45"}),
+            (200, {"task": {"task_id": "t-45", "status": "waiting_approval"}}),
+            (200, [{"approval_id": "a-11", "task_id": "t-45", "tool": "gmail.send_reply"}]),
+        ]
+        outcome = await gw._execute_call_action("call-8", REPLY)
+
+        assert outcome["queued"] is True
+        assert outcome["approval_id"] == "a-11"
+        assert "waiting for your approval" in outcome["note"]
+        assert "anything is sent" in outcome["note"]
+        created = runner.calls[0][2]
+        assert created["steps"][0]["tool"] == "gmail.send_reply"
+        assert created["steps"][0]["args"]["thread_id"] == "thread-9"
+        assert created["steps"][0]["args"]["body"] == "running late"
         assert all("approve" not in call[1] for call in runner.calls)
 
     @pytest.mark.asyncio

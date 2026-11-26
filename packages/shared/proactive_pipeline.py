@@ -20,6 +20,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from email.utils import parseaddr
 from enum import Enum
 from typing import Any, Callable, Optional
 
@@ -357,6 +358,8 @@ class ProactiveCallPipeline:
                             subject=msg.subject,
                             channel="email",
                             reference_id=msg.id,
+                            sender_email=parseaddr(msg.from_addr)[1],
+                            thread_id=msg.thread_id,
                         )
                     )
             except Exception as exc:
@@ -610,6 +613,58 @@ class ProactiveCallPipeline:
                         "action": action_payload,
                         "digest_status": "awaiting_response",
                     }
+
+        # ── Reply to an email in the digest ──
+        # Runs before the send-mail parser: "reply to Disha's email saying X"
+        # is a reply in an existing thread, not a brand-new mail. Only explicit
+        # email/mail wording routes here; a bare "reply to Disha" keeps the
+        # existing messaging behavior rather than guessing a channel.
+        reply_intent = self._extract_reply_intent(utterance)
+        if reply_intent:
+            target = self._find_email_target(session, reply_intent["who"])
+            who = reply_intent["who"] or "the sender"
+            if target is None:
+                return {
+                    "response_text": (
+                        f"I don't see an email from {who} in this digest. "
+                        "Nothing was prepared."
+                    ),
+                    "action": None,
+                    "digest_status": "awaiting_response",
+                }
+            if not target.thread_id or not target.sender_email or not target.subject:
+                return {
+                    "response_text": (
+                        "I can't reply to that email because its thread id, "
+                        "return address, or subject is missing. Nothing was prepared."
+                    ),
+                    "action": None,
+                    "digest_status": "awaiting_response",
+                }
+            subject = target.subject
+            if not subject.lower().startswith("re:"):
+                subject = f"Re: {subject}"
+            action = {
+                "type": "reply",
+                "thread_id": target.thread_id,
+                "message_id": target.reference_id,
+                "to": target.sender_email,
+                "subject": subject,
+                "body": reply_intent["body"],
+                "status": "not_sent",
+                "description": (
+                    f"reply to {target.sender or who}: '{reply_intent['body']}' — not sent"
+                ),
+            }
+            session.pending_actions.append(action)
+            return {
+                "response_text": (
+                    f"I've prepared a reply to {target.sender or who}: "
+                    f"'{reply_intent['body']}'. It has not been sent — should I send it?"
+                ),
+                "action": None,
+                "digest_status": "awaiting_response",
+            }
 
         # ── Send mail intent with contact resolution & disambiguation ──
         mail_intent = self._extract_mail_intent(utterance)
@@ -1113,6 +1168,59 @@ class ProactiveCallPipeline:
                 return text.split(separator, 1)[1].strip().strip('"').strip("'")
         return None
 
+    def _extract_reply_intent(self, text: str) -> Optional[dict]:
+        """Parse "reply to <who>'s email saying <body>" without guessing.
+
+        A bare "reply to Disha" returns None so it keeps its existing messaging
+        behavior; only explicit email/mail wording becomes an email reply.
+        """
+        import re
+
+        lower = text.lower().strip()
+        if not re.search(r"\b(?:reply|respond)\b", lower):
+            return None
+        if not re.search(r"\b(?:email|mail)\b", lower):
+            return None
+
+        body_match = re.search(
+            r"\b(?:saying|that|with(?: the)? message)\s+(.+)$", text, re.I
+        )
+        if not body_match:
+            return None
+        body = body_match.group(1).strip().strip('"').strip("'")
+        if not body:
+            return None
+
+        who_match = re.search(
+            r"\b(?:reply|respond)\s+to\s+(.+?)(?:'s)?\s+(?:email|mail)\b", text, re.I
+        )
+        who = ""
+        if who_match:
+            who = who_match.group(1).strip()
+            who = re.sub(r"^(?:the|this|that)\b\s*", "", who, flags=re.I).strip()
+            if who.lower() in ("", "the", "this", "that", "email", "mail"):
+                who = ""
+        return {"who": who, "body": body}
+
+    def _find_email_target(self, session: CallSession, who: str) -> Optional[DigestItem]:
+        """Find the digest email the reply intent points at.
+
+        An empty ``who`` means "this email" — the first email in the digest.
+        A name only matches a sender it actually appears in; no fuzzy guessing.
+        """
+        emails = self._items_of_type(session, "email")
+        if not emails:
+            return None
+        if not who:
+            return emails[0]
+        needle = who.lower()
+        for item in emails:
+            if needle in (item.sender or "").lower():
+                return item
+            if needle in (item.sender_email or "").lower():
+                return item
+        return None
+
     def _extract_reaction(self, text: str) -> Optional[str]:
         """Extract emoji reaction from text."""
         emoji_map = {
@@ -1148,7 +1256,7 @@ class ProactiveCallPipeline:
         import re
         # Pattern 1: send (a) mail/email to <recipient> saying/that/with message/: <body>
         pattern_with_body = (
-            r"(?:send\s+(?:a\s+)?(?:mail|email)\s+to|mail\s+to|email\s+to|mail|email)\s+"
+            r"\b(?:send\s+(?:a\s+)?(?:mail|email)\s+to|mail\s+to|email\s+to|mail|email)\s+"
             r"([a-zA-Z0-9_\s]+?)\s+"
             r"(?:saying|that|with message|with body|telling (?:him|them|her)|:)\s+"
             r"(.+)"
@@ -1166,7 +1274,7 @@ class ProactiveCallPipeline:
 
         # Pattern 2: send (a) mail/email to <recipient> (no body)
         pattern_no_body = (
-            r"(?:send\s+(?:a\s+)?(?:mail|email)\s+to|mail\s+to|email\s+to|mail|email)\s+"
+            r"\b(?:send\s+(?:a\s+)?(?:mail|email)\s+to|mail\s+to|email\s+to|mail|email)\s+"
             r"([a-zA-Z0-9_\s]+)$"
         )
         m2 = re.search(pattern_no_body, lower, re.IGNORECASE)
