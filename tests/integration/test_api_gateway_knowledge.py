@@ -41,8 +41,6 @@ class _AsyncClient:
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    import httpx
-
     monkeypatch.setenv("VIORIS_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(gw, "KNOWLEDGE_URL", "http://127.0.0.1:18999")
     gw._store = PairingStore(secret="test-secret")
@@ -119,9 +117,9 @@ def test_service_403_is_not_converted_into_success(client):
 
 
 def test_unreachable_service_returns_503(client):
-    import httpx
+    from httpx import ConnectError
 
-    client.responses.append(httpx.ConnectError("refused"))
+    client.responses.append(ConnectError("refused"))
     response = client.get("/v1/knowledge/documents", headers=client.auth_headers)
     assert response.status_code == 503
     assert "unreachable" in response.json()["detail"]

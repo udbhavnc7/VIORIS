@@ -7,6 +7,9 @@ Starts the services the interface actually talks to, in dependency order:
     memory           :8441   local memory store
     task runner      :8421   planning, approvals, execution, audit
     computer agent   :8430   screen mirror + remote input (optional)
+    browser agent    :8431   isolated URL reads (optional)
+    documents agent  :8432   allow-listed file reads (optional)
+    knowledge index  :8442   approved-doc search (optional)
     API gateway      :8420   the only service the UI may reach
     UI host          :8425   React build served by a loopback Express proxy
 
@@ -18,7 +21,7 @@ Usage:
     python run_vioris.py --open          # also open the browser
     python run_vioris.py --critical-pin 1234
     python run_vioris.py --no-demo       # no sample connectors
-    python run_vioris.py --no-agent      # skip screen mirroring
+    python run_vioris.py --no-agent      # skip local agents (screen mirroring, browser, files, knowledge)
     python run_vioris.py --no-ui         # backend only
 """
 
@@ -78,6 +81,58 @@ def color(name: str, text: str) -> str:
     if not sys.stdout.isatty():
         return text
     return f"{COLORS.get(name, '')}{text}{COLORS['reset']}"
+
+
+def local_agent_services(include_computer: bool) -> list[Service]:
+    """Optional local daemons the executor routes browser/file tools to.
+
+    They are optional: a missing Playwright browser or an empty file allow-list
+    must not stop the core loop, and every planner route that needs them already
+    reports the underlying failure instead of claiming success.
+    """
+    services = [
+        Service(
+            "browser",
+            "Browser agent",
+            8431,
+            "agents.browser.app.daemon:app",
+            "/health",
+            "blue",
+            optional=True,
+        ),
+        Service(
+            "documents",
+            "Documents agent",
+            8432,
+            "agents.documents.app.daemon:app",
+            "/health",
+            "amber",
+            optional=True,
+        ),
+        Service(
+            "knowledge",
+            "Knowledge index",
+            8442,
+            "services.knowledge_service.app.api:app",
+            "/knowledge/health",
+            "violet",
+            optional=True,
+        ),
+    ]
+    if include_computer:
+        services.insert(
+            0,
+            Service(
+                "computer",
+                "Computer agent",
+                8430,
+                "agents.computer.app.daemon:app",
+                "/windows",
+                "amber",
+                optional=True,
+            ),
+        )
+    return services
 
 
 def probe(url: str, timeout: float = 0.8) -> bool:
@@ -213,9 +268,12 @@ def main() -> int:
 
     env = os.environ.copy()
     env["VIORIS_DEMO_CONNECTORS"] = "1" if demo else "0"
-    env["VIORUS_TASK_RUNNER_URL"] = f"http://127.0.0.1:8421"
+    env["VIORUS_TASK_RUNNER_URL"] = "http://127.0.0.1:8421"
     env["VIORIS_MEMORY_URL"] = "http://127.0.0.1:8441"
     env["VIORUS_COMPUTER_URL"] = "http://127.0.0.1:8430"
+    env["VIORUS_BROWSER_URL"] = "http://127.0.0.1:8431"
+    env["VIORUS_DOCUMENTS_URL"] = "http://127.0.0.1:8432"
+    env["VIORUS_KNOWLEDGE_URL"] = "http://127.0.0.1:8442"
     if args.critical_pin:
         env["VIORIS_CRITICAL_PIN"] = args.critical_pin
     else:
@@ -254,17 +312,7 @@ def main() -> int:
         Service("runner", "Task runner", 8421, "services.task_runner.app.api:app", "/tasks", "green"),
     ]
     if not args.no_agent:
-        services.append(
-            Service(
-                "computer",
-                "Computer agent",
-                8430,
-                "agents.computer.app.daemon:app",
-                "/windows",
-                "amber",
-                optional=True,
-            )
-        )
+        services.extend(local_agent_services(include_computer=True))
     services.append(
         Service(
             "gateway",

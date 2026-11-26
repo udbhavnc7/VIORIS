@@ -99,7 +99,7 @@ def test_navigate_is_observe_tier_and_keeps_url(planner):
 
 def test_compound_request_is_not_narrowed_to_one_new_route(planner):
     engine, backend = planner
-    plan = engine.plan("check my notes and search bookmarks for python")
+    engine.plan("check my notes and search bookmarks for python")
     # The compound guard must hand this back to the LLM rather than silently
     # dropping one of the two instructions.
     assert backend.calls == 1

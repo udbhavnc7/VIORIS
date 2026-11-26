@@ -49,6 +49,7 @@ A tool's risk tier is registered **statically** in a permission registry — nev
 - **Everything runs on my laptop, not a rented cloud server.** There is no paid always-on hosting in this project.
 - **Phone-to-laptop access uses Tailscale** (free private mesh network) — never a custom relay server, never an open inbound port on the laptop. If you're implementing anything under Phase 5 (Phone Control Center), target reachability over the Tailscale network, not the public internet.
 - **No server-initiated phone calls in v1** — Twilio-style telephony costs money per minute. Delegated calling in v1 means drafting the script and handing off to the phone's native dialer, not an autonomous call.
+- **Hosted LLM failover is opt-in** — the planner defaults to local Ollama. Groq/OpenRouter/Gemini free tiers are only chained in when `VIORIS_LLM_FALLBACKS=1`; an API key alone is not consent to send transcripts off the laptop.
 
 ## Tech stack (match my existing toolkit, don't introduce new frameworks without asking)
 

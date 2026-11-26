@@ -11,7 +11,7 @@ Two categories of cost hide in a project like this: **per-call cost** (LLM API t
 | Component | Original pick | Free replacement | Notes |
 |---|---|---|---|
 | LLM core (planning/reasoning) | Paid Claude/Gemini API at scale | **Local LLM via Ollama** (Llama 3.1 8B / Qwen2.5 / Mistral, whichever runs well on your hardware) | Free forever, runs on your laptop. Trade-off: weaker function-calling reliability than frontier hosted models — see §5 |
-| LLM (backup / when local isn't enough) | — | **Gemini API free tier** or **Claude API free credits** for occasional heavier reasoning calls | Free tiers have daily/monthly limits — use only for tasks local models genuinely struggle with, not as the default |
+| LLM (backup / when local isn't enough) | — | **Gemini / Groq / OpenRouter free tiers** for occasional heavier reasoning calls | Free tiers have daily/monthly limits — use only for tasks local models genuinely struggle with, never as the default. In code this is `VIORIS_LLM_FALLBACKS=1` (off by default); an API key alone does not enable it, and Ollama is always tried first |
 | STT | Whisper (already free) | **Whisper (local, via faster-whisper or whisper.cpp)** | Already free and open-source — no change needed, just run it locally, not via a paid API |
 | TTS | ElevenLabs (paid) | **Piper TTS** or **Coqui TTS** (local, open-source) | Noticeably more robotic than ElevenLabs, but zero cost and fully offline |
 | Wake word | Porcupine (free tier limited) | **openWakeWord** (fully open-source, unlimited, local) | No account/API key needed at all |
@@ -56,7 +56,11 @@ Tailscale replaces "the custom relay + mTLS" from the original architecture doc,
 ## 4. Updated `.env.example` additions
 
 ```
-LLM_PROVIDER=ollama            # or "gemini_free_tier" for occasional fallback
+LLM_PROVIDER=ollama
+VIORIS_LLM_FALLBACKS=0         # set to 1 only to allow hosted free-tier failover
+# GROQ_API_KEY=                # only read when VIORIS_LLM_FALLBACKS=1
+# OPENROUTER_API_KEY=
+# GEMINI_API_KEY=
 OLLAMA_MODEL=llama3.1:8b
 TTS_ENGINE=piper
 STT_ENGINE=whisper_local
