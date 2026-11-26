@@ -28,6 +28,23 @@ from packages.shared.infrastructure import LLMRouter
 logger = logging.getLogger(__name__)
 
 
+def default_llm_backend() -> Any:
+    """Return the planner's default backend.
+
+    Local Ollama is the default, always. Free-tier hosted providers are used
+    ONLY when the user explicitly opts in with ``VIORIS_LLM_FALLBACKS=1``:
+    an API key being present is not consent to upload transcripts to a third
+    party (see 08-free-stack-and-remote-access.md).
+    """
+    if os.getenv("VIORIS_LLM_FALLBACKS", "0").strip() == "1":
+        logger.warning(
+            "Hosted free-tier LLM fallbacks enabled — if Ollama fails, the "
+            "request may be sent to Groq/OpenRouter/Gemini."
+        )
+        return FallbackLLMBackend()
+    return OllamaBackend()
+
+
 class PlannerBackendError(Exception):
     """The configured LLM backend failed in a way that prevents planning."""
 
@@ -103,6 +120,10 @@ class OpenAICompatBackend:
                 data = resp.json()
         except httpx.HTTPError as exc:
             raise PlannerBackendError(f"{self.provider} request failed: {exc}") from exc
+        except (ValueError, TypeError) as exc:
+            raise PlannerBackendError(f"{self.provider} returned invalid JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise PlannerBackendError(f"{self.provider} returned an unexpected payload")
 
         choices = data.get("choices") or []
         message = choices[0].get("message", {}) if choices else {}
@@ -161,6 +182,10 @@ class GeminiBackend:
                 data = resp.json()
         except httpx.HTTPError as exc:
             raise PlannerBackendError(f"Gemini request failed: {exc}") from exc
+        except (ValueError, TypeError) as exc:
+            raise PlannerBackendError(f"Gemini returned invalid JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise PlannerBackendError("Gemini returned an unexpected payload")
 
         calls: list[dict] = []
         for cand in data.get("candidates") or []:

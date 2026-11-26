@@ -22,7 +22,7 @@ from packages.shared.intent_classifier import classify_intent, IntentType
 from packages.shared.permission_engine import PermissionEngine, UnknownToolError
 from packages.shared.schemas import TaskStep
 
-from .llm_client import FallbackLLMBackend, OllamaBackend, PlannerBackendError
+from .llm_client import default_llm_backend, PlannerBackendError
 from .tool_schema import build_tool_schema
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ class Plan:
 
 class Planner:
     def __init__(self, backend: callable | None = None, deterministic: bool | None = None) -> None:
-        self.backend = backend or FallbackLLMBackend()
+        self.backend = backend or default_llm_backend()
         # Deterministic workflow routing is the offline-first default. An
         # explicitly injected backend means the caller wants the model to plan
         # (tests, custom models), so routing only runs when asked for it.

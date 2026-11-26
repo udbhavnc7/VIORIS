@@ -458,25 +458,35 @@ class ProactiveCallPipeline:
         result = self._process_utterance(session, utterance)
 
         # Dispatch confirmed actions through the wired action handler (never
-        # silently bypassing the permission/approval engine).
+        # silently bypassing the permission/approval engine). If no handler is
+        # wired, say so plainly — a spoken "yes" must never imply delivery.
         action = result.get("action")
-        if (
-            self.on_action is not None
-            and isinstance(action, dict)
-            and action.get("type") == "execute"
-        ):
-            try:
-                outcome = self.on_action(call_id, action.get("action") or action)
-                if inspect.isawaitable(outcome):
-                    outcome = await outcome
-                if isinstance(outcome, dict) and outcome.get("note"):
-                    result["response_text"] = f"{result['response_text']} {outcome['note']}".strip()
-                    result["task_id"] = outcome.get("task_id")
-            except Exception as exc:
-                logger.warning("Call on_action callback failed: %s", exc)
+        if isinstance(action, dict) and action.get("type") == "execute":
+            result["queued"] = False
+            if self.on_action is not None:
+                try:
+                    outcome = self.on_action(call_id, action.get("action") or action)
+                    if inspect.isawaitable(outcome):
+                        outcome = await outcome
+                    if isinstance(outcome, dict) and outcome.get("note"):
+                        result["response_text"] = (
+                            f"{result['response_text']} {outcome['note']}"
+                        ).strip()
+                        result["task_id"] = outcome.get("task_id")
+                        result["queued"] = outcome.get("queued", True)
+                except Exception as exc:
+                    logger.warning("Call on_action callback failed: %s", exc)
+                    result["response_text"] = (
+                        f"{result['response_text']} Could not queue that step: {exc}"
+                    ).strip()
+            else:
                 result["response_text"] = (
-                    f"{result['response_text']} Could not queue that step: {exc}"
+                    f"{result['response_text']} Nothing has been sent or executed — "
+                    "a transport and approval handler are not connected yet."
                 ).strip()
+                logger.warning(
+                    "Call %s confirmed an action but no on_action handler is wired", call_id
+                )
 
         # Send response back to phone
         if result["response_text"]:

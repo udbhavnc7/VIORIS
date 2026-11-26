@@ -209,9 +209,29 @@ def _task_runner_ws_url() -> str:
     return base + "/ws/events"
 
 
+async def _forward_task_event(raw: str, hub=None) -> bool:
+    """Push one task-runner wire event to both paired device classes.
+
+    Every event type is forwarded: approvals, stops and kill-phrase events are
+    exactly what "never act invisibly" requires the phone to see. Unknown or
+    malformed events are ignored instead of being pushed as fake events.
+    """
+    import json
+
+    try:
+        event = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(event, dict) or not event.get("type"):
+        return False
+    hub = hub or get_hub()
+    await hub.send_to_phones(event)
+    await hub.send_to_laptops(event)
+    return True
+
+
 async def _task_event_bridge() -> None:
     """Forward task-runner live events (approvals, stops) to paired devices."""
-    import json
     import websockets
 
     backoff = 2.0
@@ -220,14 +240,7 @@ async def _task_event_bridge() -> None:
             async with websockets.connect(_task_runner_ws_url(), open_timeout=3) as ws:
                 backoff = 2.0
                 async for raw in ws:
-                    try:
-                        event = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(event, dict) and event.get("type"):
-                        hub = get_hub()
-                        await hub.send_to_phones(event)
-                        await hub.send_to_laptops(event)
+                    await _forward_task_event(raw)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — retry quietly when runner is offline
@@ -1250,6 +1263,51 @@ async def v1_memory_delete(memory_id: str, device: Device = Depends(_require_dev
     return {"device": device.device_id, "result": result}
 
 
+# ─── knowledge (Phase 4 / local vector index) ───────────────────────────────
+
+
+async def _knowledge_request(method: str, path: str, body: dict | None = None) -> dict | list:
+    """Proxy only to the local knowledge service; an ingest is still gated by
+    that service's approval roots — the gateway never bypasses them."""
+    url = f"{KNOWLEDGE_URL.rstrip('/')}{path}"
+    try:
+        resp = await _client().request(method, url, json=body, timeout=10.0)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"knowledge service unreachable: {exc}") from exc
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        payload = {"detail": resp.text}
+    if resp.status_code >= 400:
+        detail = payload.get("detail") if isinstance(payload, dict) else str(payload)
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return payload
+
+
+@app.get("/v1/knowledge/documents")
+async def v1_knowledge_documents(device: Device = Depends(_require_device)) -> dict:
+    return {
+        "device": device.device_id,
+        "documents": await _knowledge_request("GET", "/knowledge/documents"),
+    }
+
+
+@app.post("/v1/knowledge/ingest")
+async def v1_knowledge_ingest(
+    req: KnowledgeIngestPayload, device: Device = Depends(_require_device)
+) -> dict:
+    result = await _knowledge_request("POST", "/knowledge/ingest", req.model_dump())
+    return {"device": device.device_id, "result": result}
+
+
+@app.post("/v1/knowledge/query")
+async def v1_knowledge_query(
+    req: KnowledgeQueryPayload, device: Device = Depends(_require_device)
+) -> dict:
+    result = await _knowledge_request("POST", "/knowledge/query", req.model_dump())
+    return {"device": device.device_id, "result": result}
+
+
 # ─── connections: honest status of every integration ────────────────────────
 
 
@@ -1266,6 +1324,9 @@ _CONNECTION_CATALOG: list[tuple[str, str, str, str, list[str]]] = [
     ("reservations", "Reservations", "actions", "VIORUS_RESERVATIONS_URL", ["Search slots", "Book after approval"]),
     ("smart_home", "Smart home", "actions", "VIORUS_SMART_HOME_URL", ["Read status", "Control after approval"]),
     ("computer", "Computer agent", "actions", "VIORUS_COMPUTER_URL", ["Screen mirror", "Remote input after approval"]),
+    ("browser", "Browser agent", "actions", "VIORUS_BROWSER_URL", ["Open URL", "Read page"]),
+    ("documents", "Documents agent", "actions", "VIORUS_DOCUMENTS_URL", ["Search files", "Read allow-listed files"]),
+    ("knowledge", "Knowledge index", "knowledge", "VIORUS_KNOWLEDGE_URL", ["Ingest approved docs", "Source-cited answers"]),
 ]
 
 
@@ -1295,7 +1356,7 @@ async def v1_connections(device: Device = Depends(_require_device)) -> dict:
     # health is the same endpoint the task-runner uses, and it stays local
     # even while the sample connectors are switched on.
     health_path = {"computer": "/windows"}
-    local_only = {"computer"}
+    local_only = {"computer", "browser", "documents", "knowledge"}
 
     async def probe_entry(key: str, env: str) -> tuple[bool, str]:
         base = os.getenv(env)
