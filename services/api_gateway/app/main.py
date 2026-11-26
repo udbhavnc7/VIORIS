@@ -53,8 +53,17 @@ TASK_RUNNER_URL = os.getenv("VIORUS_TASK_RUNNER_URL") or os.getenv(
 COMPUTER_URL = os.getenv("VIORUS_COMPUTER_URL") or os.getenv(
     "VIORIS_COMPUTER_URL", "http://127.0.0.1:8430"
 )
+BROWSER_URL = os.getenv("VIORUS_BROWSER_URL") or os.getenv(
+    "VIORIS_BROWSER_URL", "http://127.0.0.1:8431"
+)
+DOCUMENTS_URL = os.getenv("VIORUS_DOCUMENTS_URL") or os.getenv(
+    "VIORIS_DOCUMENTS_URL", "http://127.0.0.1:8432"
+)
 MEMORY_URL = os.getenv("VIORIS_MEMORY_URL") or os.getenv(
     "VIORUS_MEMORY_URL", "http://127.0.0.1:8441"
+)
+KNOWLEDGE_URL = os.getenv("VIORIS_KNOWLEDGE_URL") or os.getenv(
+    "VIORUS_KNOWLEDGE_URL", "http://127.0.0.1:8442"
 )
 GATEWAY_HOST = os.getenv("VIORIS_API_HOST", "0.0.0.0")
 GATEWAY_PORT = int(os.getenv("VIORIS_API_PORT", "8420"))
@@ -146,6 +155,16 @@ class MemoryCorrectPayload(BaseModel):
     category: str | None = None
 
 
+class KnowledgeIngestPayload(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    path: str = Field(min_length=1, max_length=1000)
+
+
+class KnowledgeQueryPayload(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=3, ge=1, le=20)
+
+
 class ExplainQueryPayload(BaseModel):
     """A natural-language "why did you do that?" question."""
 
@@ -178,6 +197,43 @@ def _device_dict(device) -> DeviceResponse:
 # ─── lifespan ────────────────────────────────────────────────────────────────
 
 _bg_task: asyncio.Task | None = None
+_event_bridge_task: asyncio.Task | None = None
+
+
+def _task_runner_ws_url() -> str:
+    base = TASK_RUNNER_URL.rstrip("/")
+    if base.startswith("https://"):
+        return "wss://" + base[len("https://") :] + "/ws/events"
+    if base.startswith("http://"):
+        return "ws://" + base[len("http://") :] + "/ws/events"
+    return base + "/ws/events"
+
+
+async def _task_event_bridge() -> None:
+    """Forward task-runner live events (approvals, stops) to paired devices."""
+    import json
+    import websockets
+
+    backoff = 2.0
+    while True:
+        try:
+            async with websockets.connect(_task_runner_ws_url(), open_timeout=3) as ws:
+                backoff = 2.0
+                async for raw in ws:
+                    try:
+                        event = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(event, dict) and event.get("type"):
+                        hub = get_hub()
+                        await hub.send_to_phones(event)
+                        await hub.send_to_laptops(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — retry quietly when runner is offline
+            logger.debug("Task event bridge disconnected: %s", exc)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 1.5, 15.0)
 
 
 async def _completed_tasks_snapshot() -> list[dict]:
@@ -219,20 +275,22 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         register_all_tools()
         PermissionEngine.freeze()
 
-    # Start background digest checker
-    global _bg_task
+    # Start background digest checker & task-runner event bridge
+    global _bg_task, _event_bridge_task
     _bg_task = asyncio.create_task(_digest_checker())
-    logger.info("Background digest checker started")
+    _event_bridge_task = asyncio.create_task(_task_event_bridge())
+    logger.info("Background digest checker and task event bridge started")
 
     yield
 
     # Shutdown
-    if _bg_task:
-        _bg_task.cancel()
-        try:
-            await _bg_task
-        except asyncio.CancelledError:
-            pass
+    for task in (_bg_task, _event_bridge_task):
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     if _pooled_client is not None and not _pooled_client.is_closed:
         await _pooled_client.aclose()
 

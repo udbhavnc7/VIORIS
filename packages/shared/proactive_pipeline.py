@@ -12,6 +12,7 @@ Flow:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -160,6 +161,8 @@ class ProactiveCallPipeline:
         dialogue: Optional[DialogueOrchestrator] = None,
         seed_demo_contacts: bool = False,
         trigger_store: Optional[CallTriggerStore] = None,
+        digest_fetcher: Optional[Callable] = None,
+        contact_loader: Optional[Callable] = None,
     ):
         self.hub = hub
         self.gmail = gmail or GmailConnector()
@@ -172,6 +175,8 @@ class ProactiveCallPipeline:
         # Optional: user-defined call triggers. None means "no custom triggers"
         # rather than silently creating a file in the data dir.
         self.trigger_store = trigger_store
+        self.digest_fetcher = digest_fetcher
+        self.contact_loader = contact_loader
 
         self._sessions: dict[str, CallSession] = {}
         self._schedule = DigestSchedule()
@@ -250,6 +255,15 @@ class ProactiveCallPipeline:
         if driving_scenario and not self.contacts.list_all():
             for contact in _DEMO_CONTACTS:
                 self.contacts.add(contact)
+        elif not driving_scenario and self.contact_loader is not None and not self.contacts.list_all():
+            try:
+                loaded = self.contact_loader()
+                if inspect.isawaitable(loaded):
+                    loaded = await loaded
+                for contact in loaded or []:
+                    self.contacts.add(contact)
+            except Exception as exc:
+                logger.warning("Failed to load contacts: %s", exc)
 
         # 1. Fetch items from connectors
         items = await self._fetch_digest_items(driving_scenario=driving_scenario)
@@ -330,6 +344,16 @@ class ProactiveCallPipeline:
                     )
             except Exception as exc:
                 logger.warning("Failed to fetch Gmail: %s", exc)
+
+        if not items and not driving_scenario and self.digest_fetcher is not None:
+            try:
+                fetched = self.digest_fetcher()
+                if inspect.isawaitable(fetched):
+                    fetched = await fetched
+                if fetched:
+                    items.extend(fetched)
+            except Exception as exc:
+                logger.warning("Failed to fetch connector digest: %s", exc)
 
         if not items and driving_scenario:
             items.extend(DigestItem(**item) for item in _DEMO_DRIVING_ITEMS)
@@ -432,6 +456,27 @@ class ProactiveCallPipeline:
 
         # Parse the utterance
         result = self._process_utterance(session, utterance)
+
+        # Dispatch confirmed actions through the wired action handler (never
+        # silently bypassing the permission/approval engine).
+        action = result.get("action")
+        if (
+            self.on_action is not None
+            and isinstance(action, dict)
+            and action.get("type") == "execute"
+        ):
+            try:
+                outcome = self.on_action(call_id, action.get("action") or action)
+                if inspect.isawaitable(outcome):
+                    outcome = await outcome
+                if isinstance(outcome, dict) and outcome.get("note"):
+                    result["response_text"] = f"{result['response_text']} {outcome['note']}".strip()
+                    result["task_id"] = outcome.get("task_id")
+            except Exception as exc:
+                logger.warning("Call on_action callback failed: %s", exc)
+                result["response_text"] = (
+                    f"{result['response_text']} Could not queue that step: {exc}"
+                ).strip()
 
         # Send response back to phone
         if result["response_text"]:

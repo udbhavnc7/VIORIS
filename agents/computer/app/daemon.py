@@ -88,6 +88,11 @@ def _outcome(outcome) -> dict:
     }
 
 
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "service": "computer-agent"}
+
+
 @app.get("/windows")
 def windows() -> dict:
     return _outcome(get_agent().list_windows())

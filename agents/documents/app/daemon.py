@@ -11,6 +11,7 @@ Run from the repo root (allow-lists come from env, see allowlist.py):
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -20,6 +21,7 @@ from packages.shared.permission_engine import register_phase3_files_tools
 from .agent import DocumentsAgent
 
 
+@asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     register_phase3_files_tools()
     yield
@@ -69,6 +71,11 @@ def _outcome(outcome) -> dict:
         "blocked": outcome.blocked,
         "error": outcome.error,
     }
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "service": "documents-agent"}
 
 
 @app.post("/search")

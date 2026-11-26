@@ -60,6 +60,11 @@ def _outcome(outcome) -> dict:
     }
 
 
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "service": "browser-agent"}
+
+
 @app.post("/navigate")
 def navigate(req: NavigateRequest) -> dict:
     return _outcome(get_agent().navigate(req.url))

@@ -22,7 +22,7 @@ from packages.shared.intent_classifier import classify_intent, IntentType
 from packages.shared.permission_engine import PermissionEngine, UnknownToolError
 from packages.shared.schemas import TaskStep
 
-from .llm_client import OllamaBackend, PlannerBackendError
+from .llm_client import FallbackLLMBackend, OllamaBackend, PlannerBackendError
 from .tool_schema import build_tool_schema
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ class Plan:
 
 class Planner:
     def __init__(self, backend: callable | None = None, deterministic: bool | None = None) -> None:
-        self.backend = backend or OllamaBackend()
+        self.backend = backend or FallbackLLMBackend()
         # Deterministic workflow routing is the offline-first default. An
         # explicitly injected backend means the caller wants the model to plan
         # (tests, custom models), so routing only runs when asked for it.
@@ -255,6 +255,192 @@ class Planner:
                         "contacts.search",
                         {"query": contact.group(1).strip(" .?")},
                         reason="The request was a contact lookup, so the plan searches the contact book read-only.",
+                    )
+                ],
+            )
+
+        # ── smart home: read status or execute-gated control ─────────────
+        if re.search(r"\b(smart\s*home|devices?|lights?|thermostat|sensors?)\b", lower) and re.search(
+            r"\b(check|status|list|show|what|read)\b", lower
+        ):
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "smart_home.device_status",
+                        reason="The request asked for smart-home status, which is Observe-tier and changes nothing.",
+                    )
+                ],
+            )
+        toggle = re.search(
+            r"\bturn\s+(on|off)\s+(?:the\s+)?(.+)$",
+            text,
+            re.I,
+        )
+        if toggle:
+            action = toggle.group(1).lower()
+            target_name = toggle.group(2).strip(" .?")
+            device_id = (
+                "light.living_room"
+                if "living" in target_name.lower() or "light" in target_name.lower()
+                else re.sub(r"[^a-z0-9]+", "_", target_name.lower()).strip("_") or "device"
+            )
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "smart_home.control",
+                        {
+                            "device_id": device_id,
+                            "device_name": target_name,
+                            "category": "light" if "light" in target_name.lower() else "device",
+                            "action": action,
+                            "value": action,
+                        },
+                        reason="Controlling a smart-home device is Execute-tier and pauses at the approval gate with the exact target.",
+                    )
+                ],
+            )
+
+        # ── notes / cloud files / bookmarks / browser history ────────────
+        if re.search(r"\bnotes?\b", lower) and re.search(r"\b(check|read|list|recent|show|my)\b", lower):
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "notes.list_recent",
+                        reason="The request asked for recent notes; this is an Observe-tier read.",
+                    )
+                ],
+            )
+        if re.search(r"\b(cloud files|drive|recent files|documents)\b", lower) and re.search(
+            r"\b(check|list|recent|show|my)\b", lower
+        ):
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "cloud_files.list_recent",
+                        reason="The request asked for recent cloud files; metadata-only Observe read.",
+                    )
+                ],
+            )
+        bm = re.search(r"\b(?:search|find|check)\s+bookmarks?(?:\s+for)?\s*(.*)$", text, re.I)
+        if "bookmark" in lower:
+            query = bm.group(1).strip(" .?") if bm else ""
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "bookmarks.search",
+                        {"query": query},
+                        reason="Searching saved browser bookmarks is Observe-tier and read-only.",
+                    )
+                ],
+            )
+        if re.search(r"\b(history|recent pages|visited)\b", lower):
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "history.recent",
+                        reason="Reading recent browser history is Observe-tier and read-only.",
+                    )
+                ],
+            )
+
+        # ── telephony: prepare a call (never auto-dials) ─────────────────
+        prep_call = re.search(
+            r"\b(?:prepare|draft)\s+(?:a\s+)?call\s+(?:to\s+)?(.+?)(?:\s+(?:about|for)\s+(.+))?$",
+            text,
+            re.I,
+        )
+        if prep_call:
+            recipient = prep_call.group(1).strip(" ,.")
+            purpose = (prep_call.group(2) or "").strip(" ,.")
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "telephony.prepare_call",
+                        {"recipient": recipient, "purpose": purpose},
+                        reason="Preparing a call is Prepare-tier: it drafts a talking-point brief and never dials autonomously.",
+                    )
+                ],
+            )
+
+        # ── computer: windows / screenshot / OCR ─────────────────────────
+        if re.search(r"\b(open windows|list windows|what windows)\b", lower):
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "computer.list_windows",
+                        agent="computer",
+                        reason="Listing open window titles is Observe-tier.",
+                    )
+                ],
+            )
+        if re.search(r"\b(screenshot|capture screen|capture the screen)\b", lower):
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "computer.capture_screenshot",
+                        agent="computer",
+                        reason="Capturing one screenshot is Observe-tier.",
+                    )
+                ],
+            )
+        if re.search(r"\b(read screen|read the screen|what(?:'s| is) on (?:my |the )?screen)\b", lower):
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "computer.read_screen_text",
+                        agent="computer",
+                        reason="Extracting visible text via OCR is Observe-tier.",
+                    )
+                ],
+            )
+
+        # ── isolated browser: navigate / read page ───────────────────────
+        nav = re.search(r"\b(?:navigate|browse|open|go)\s+(?:to\s+)?(https?://\S+)", text, re.I)
+        if nav:
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "browser.navigate",
+                        {"url": nav.group(1).rstrip(".,")},
+                        agent="browser",
+                        reason="Opening a URL in the isolated automation browser is Observe-tier and stops on login/CAPTCHA walls.",
+                    )
+                ],
+            )
+        if re.search(r"\b(read (?:this |the )?(?:page|webpage))\b", lower):
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "browser.read_page",
+                        agent="browser",
+                        reason="Reading the active automation browser page is Observe-tier.",
+                    )
+                ],
+            )
+
+        # ── allow-listed files: search ───────────────────────────────────
+        fsearch = re.search(r"\b(?:search|find)\s+files?(?:\s+for)?\s+(.+)$", text, re.I)
+        if fsearch:
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "file.search_files",
+                        {"query": fsearch.group(1).strip(" .?")},
+                        agent="documents",
+                        reason="Searching inside allow-listed directories is Observe-tier.",
                     )
                 ],
             )

@@ -36,6 +36,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 COMPUTER_URL = os.getenv("VIORUS_COMPUTER_URL", "http://127.0.0.1:8430")
+BROWSER_URL = os.getenv("VIORUS_BROWSER_URL", "http://127.0.0.1:8431")
+DOCUMENTS_URL = os.getenv("VIORUS_DOCUMENTS_URL", "http://127.0.0.1:8432")
 SMART_HOME_URL = os.getenv("VIORUS_SMART_HOME_URL", "http://127.0.0.1:8455")
 _REMINDER_LOCK = threading.Lock()
 
@@ -159,6 +161,8 @@ def make_executor(
     computer_url: str | None = None,
     smart_home_url: str | None = None,
     connector_urls: dict[str, str] | None = None,
+    browser_url: str | None = None,
+    documents_url: str | None = None,
 ):
     """Return an `execute(step, task)` closure wired to the local services.
 
@@ -168,6 +172,8 @@ def make_executor(
     tests.
     """
     computer_url = computer_url or os.getenv("VIORUS_COMPUTER_URL", COMPUTER_URL)
+    browser_url = browser_url or os.getenv("VIORUS_BROWSER_URL", BROWSER_URL)
+    documents_url = documents_url or os.getenv("VIORUS_DOCUMENTS_URL", DOCUMENTS_URL)
     smart_home_url = smart_home_url or os.getenv("VIORUS_SMART_HOME_URL", SMART_HOME_URL)
     connector_urls = connector_urls or {}
 
@@ -201,10 +207,17 @@ def make_executor(
             "computer.start_remote_session",
             "computer.remote_input",
             "computer.capture_screenshot",
+            "computer.read_screen_text",
             "computer.list_windows",
+            "computer.open_app",
+            "computer.lock_workstation",
             "system.open_app",
         ):
             return _call_computer(tool, args, computer_url)
+        if tool.startswith("browser."):
+            return _call_browser(tool, args, browser_url)
+        if tool.startswith("file.") or tool == "terminal.run":
+            return _call_documents(tool, args, documents_url)
         if tool.startswith("smart_home."):
             return _call_smart_home(step, task, args, smart_home_url)
 
@@ -259,12 +272,18 @@ def _call_computer(tool: str, args: dict, base: str) -> dict:
     elif tool == "computer.capture_screenshot":
         url = f"{base}/screenshot"
         payload = None
+    elif tool == "computer.read_screen_text":
+        url = f"{base}/screen-text"
+        payload = None
     elif tool == "computer.list_windows":
         url = f"{base}/windows"
         payload = None
-    elif tool == "system.open_app":
+    elif tool in ("system.open_app", "computer.open_app"):
         url = f"{base}/open-app"
-        payload = {"name": args.get("name") or args.get("app")}
+        payload = {"name": args.get("name") or args.get("app") or ""}
+    elif tool == "computer.lock_workstation":
+        url = f"{base}/remote/lock"
+        payload = {"device_id": args.get("device_id", "")}
     else:  # pragma: no cover — guarded by _dispatch
         raise RuntimeError(f"unrouted tool {tool}")
 
@@ -276,6 +295,75 @@ def _call_computer(tool: str, args: dict, base: str) -> dict:
                 resp = client.get(url)
     except httpx.RequestError as exc:
         raise RuntimeError(f"agent daemon unreachable for {tool}: {exc}") from exc
+
+    body = _parse(resp)
+    latency_ms = int((time.time() - started) * 1000)
+    _raise_for_failure(tool, resp.status_code, body)
+    return {"ok": True, "tool": tool, "latency_ms": latency_ms, "result": body}
+
+
+def _call_browser(tool: str, args: dict, base: str) -> dict:
+    """Call the isolated browser agent daemon and surface login/CAPTCHA blocks."""
+    started = time.time()
+    if tool == "browser.navigate":
+        url = f"{base}/navigate"
+        payload: dict | None = {"url": args.get("url", "")}
+    elif tool == "browser.read_page":
+        url = f"{base}/page"
+        payload = None
+    elif tool == "browser.fill_field":
+        url = f"{base}/fill"
+        payload = {
+            "description": args.get("description") or args.get("element") or "",
+            "value": args.get("value") or "",
+        }
+    elif tool == "browser.click_element":
+        url = f"{base}/click"
+        payload = {"description": args.get("description") or args.get("element") or ""}
+    else:
+        raise RuntimeError(f"unrouted tool {tool}")
+
+    try:
+        with httpx.Client(timeout=30, trust_env=False) as client:
+            resp = client.post(url, json=payload) if payload is not None else client.get(url)
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"browser agent unreachable for {tool}: {exc}") from exc
+
+    body = _parse(resp)
+    latency_ms = int((time.time() - started) * 1000)
+    _raise_for_failure(tool, resp.status_code, body)
+    return {"ok": True, "tool": tool, "latency_ms": latency_ms, "result": body}
+
+
+def _call_documents(tool: str, args: dict, base: str) -> dict:
+    """Call the allow-listed documents/terminal agent daemon."""
+    started = time.time()
+    if tool == "file.search_files":
+        url = f"{base}/search"
+        payload = {"query": args.get("query", ""), "root": args.get("root")}
+    elif tool == "file.read":
+        url = f"{base}/read"
+        payload = {"path": args.get("path", "")}
+    elif tool == "file.move":
+        url = f"{base}/move"
+        payload = {"source": args.get("source", ""), "destination": args.get("destination", "")}
+    elif tool == "file.rename":
+        url = f"{base}/rename"
+        payload = {"path": args.get("path", ""), "new_name": args.get("new_name", "")}
+    elif tool == "file.delete":
+        url = f"{base}/delete"
+        payload = {"path": args.get("path", "")}
+    elif tool == "terminal.run":
+        url = f"{base}/terminal"
+        payload = {"command": args.get("command", ""), "args": args.get("args") or []}
+    else:
+        raise RuntimeError(f"unrouted tool {tool}")
+
+    try:
+        with httpx.Client(timeout=60, trust_env=False) as client:
+            resp = client.post(url, json=payload)
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"documents agent unreachable for {tool}: {exc}") from exc
 
     body = _parse(resp)
     latency_ms = int((time.time() - started) * 1000)
@@ -371,7 +459,12 @@ def _raise_for_failure(tool: str, status_code: int, body) -> None:
         detail = body.get("detail") if isinstance(body, dict) else str(body)
         raise RuntimeError(f"{tool} rejected: {detail}")
     if isinstance(body, dict) and body.get("ok") is False:
-        reason = body.get("error") or body.get("detail") or "connector reported failure"
+        reason = (
+            body.get("error")
+            or body.get("detail")
+            or body.get("note")
+            or "connector reported failure"
+        )
         raise RuntimeError(f"{tool} failed: {reason}")
 
 

@@ -294,6 +294,113 @@ TOOL_PARAMETERS: dict[str, dict] = {
         "required": ["device_id", "action", "value"],
         "additionalProperties": False,
     },
+    "computer.list_windows": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "computer.capture_screenshot": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "computer.read_screen_text": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "computer.open_app": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "name of the desktop application"},
+        },
+        "required": ["name"],
+        "additionalProperties": False,
+    },
+    "browser.navigate": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "http(s) URL to open in the isolated automation browser"},
+        },
+        "required": ["url"],
+        "additionalProperties": False,
+    },
+    "browser.read_page": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "browser.fill_field": {
+        "type": "object",
+        "properties": {
+            "description": {"type": "string", "description": "plain-language description of the input field"},
+            "value": {"type": "string", "description": "value to stage into the field"},
+        },
+        "required": ["description", "value"],
+        "additionalProperties": False,
+    },
+    "browser.click_element": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "current page URL (shown on diff card)"},
+            "element": {"type": "string", "description": "element description to click (shown on diff card)"},
+            "description": {"type": "string", "description": "plain-language description of the element"},
+        },
+        "required": ["element"],
+        "additionalProperties": False,
+    },
+    "file.search_files": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "filename substring to search for"},
+            "root": {"type": "string", "description": "optional allow-listed directory root"},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    "file.read": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "file path inside allow-listed directories"},
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    },
+    "file.move": {
+        "type": "object",
+        "properties": {
+            "source": {"type": "string", "description": "source path (shown on diff card)"},
+            "destination": {"type": "string", "description": "destination path (shown on diff card)"},
+        },
+        "required": ["source", "destination"],
+        "additionalProperties": False,
+    },
+    "file.rename": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "file path (shown on diff card)"},
+            "new_name": {"type": "string", "description": "new filename without path separators (shown on diff card)"},
+        },
+        "required": ["path", "new_name"],
+        "additionalProperties": False,
+    },
+    "file.delete": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "file path to permanently delete (Critical)"},
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    },
+    "terminal.run": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "allow-listed program name"},
+            "args": {"type": "array", "items": {"type": "string"}, "description": "command arguments"},
+        },
+        "required": ["command"],
+        "additionalProperties": False,
+    },
 }
 
 
