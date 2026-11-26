@@ -453,6 +453,107 @@ def get_hub() -> WebSocketHub:
     return _hub
 
 
+def _action_to_steps(action: dict) -> list[dict] | None:
+    """Translate a confirmed call action into explicit task-runner steps.
+
+    Only actions with an unambiguous, registered tool are translated. The
+    task-runner re-classifies every step from the frozen registry, so an
+    Execute-tier action still pauses at the approval gate; this function can
+    never downgrade a tier or invent a tool.
+    """
+    kind = (action or {}).get("type")
+    if kind == "message":
+        contact = str(action.get("contact") or "").strip()
+        message = str(action.get("message") or "").strip()
+        if not contact or not message:
+            return None
+        return [
+            {
+                "agent": "system",
+                "tool": "system.send_message",
+                "args": {
+                    "recipient": contact,
+                    "content": message,
+                    "channel": "whatsapp",
+                },
+                "reasoning": (
+                    "Confirmed during a call. Sending is Execute-tier, so the task "
+                    "runner pauses for explicit approval before anything leaves the laptop."
+                ),
+            }
+        ]
+    # Resuming a task needs its task id, not just a spoken summary; open_app /
+    # react / send_mail already state that no transport is connected.
+    return None
+
+
+async def _local_task_request(method: str, path: str, body: dict | None = None) -> dict:
+    """Loopback task-runner call for in-process call-session actions.
+
+    Unlike ``_proxy`` this is not device-scoped: the caller is the call
+    pipeline inside this process, not a paired device. The task-runner still
+    owns risk classification, approval and audit for every step.
+    """
+    url = f"{TASK_RUNNER_URL}{path}"
+    try:
+        resp = await _client().request(method, url, json=body, timeout=10.0)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"task-runner unreachable: {exc}") from exc
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        payload = {"raw": resp.text}
+    if resp.status_code >= 400:
+        detail = payload.get("detail") if isinstance(payload, dict) else str(payload)
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return payload
+
+
+async def _execute_call_action(call_id: str, action: dict) -> dict:
+    """Queue a confirmed call action through the task runner's approval gate.
+
+    Never auto-approves: a spoken "yes" creates the task and runs it up to the
+    gate. Execute-tier steps wait for the explicit approval card, and the
+    returned note says so.
+    """
+    steps = _action_to_steps(action)
+    if not steps:
+        return {
+            "note": "I can't queue that action from a call yet — nothing was executed.",
+            "queued": False,
+        }
+
+    description = str(action.get("description") or action.get("type") or "call action")
+    try:
+        created = await _local_task_request(
+            "POST",
+            "/tasks",
+            {"request": f"Call {call_id}: {description}", "steps": steps},
+        )
+        task_id = created.get("task_id")
+        if not task_id:
+            return {
+                "note": "The task runner returned no task id — nothing was executed.",
+                "queued": False,
+            }
+        await _local_task_request("POST", f"/tasks/{task_id}/start")
+        last = await _local_task_request("POST", f"/tasks/{task_id}/run")
+    except HTTPException as exc:
+        return {"note": f"Could not queue that step: {exc.detail}", "queued": False}
+
+    status = (last.get("task") or {}).get("status") or "created"
+    if status == "waiting_approval":
+        note = (
+            f"Queued as task {task_id}; it is waiting for your approval before "
+            "anything is sent."
+        )
+    elif status == "completed":
+        note = f"Queued as task {task_id} and completed."
+    else:
+        note = f"Queued as task {task_id} ({status})."
+    return {"note": note, "task_id": task_id, "queued": True, "status": status}
+
+
 def get_pipeline():
     """Lazy-init the proactive call pipeline."""
     global _pipeline
@@ -461,7 +562,9 @@ def get_pipeline():
         from packages.shared.proactive_pipeline import ProactiveCallPipeline
 
         _pipeline = ProactiveCallPipeline(
-            hub=get_hub(), trigger_store=CallTriggerStore()
+            hub=get_hub(),
+            trigger_store=CallTriggerStore(),
+            on_action=_execute_call_action,
         )
         _setup_hub_handlers(get_hub(), _pipeline)
     return _pipeline
