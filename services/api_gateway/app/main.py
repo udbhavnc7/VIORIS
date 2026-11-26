@@ -537,12 +537,29 @@ async def _execute_call_action(call_id: str, action: dict) -> dict:
                 "queued": False,
             }
         await _local_task_request("POST", f"/tasks/{task_id}/start")
-        last = await _local_task_request("POST", f"/tasks/{task_id}/run")
+        last: dict = {}
+        for _ in range(8):
+            last = await _local_task_request("POST", f"/tasks/{task_id}/run")
+            status = (last.get("task") or {}).get("status")
+            if status not in ("created", "running"):
+                break
+            steps = (last.get("task") or {}).get("steps") or []
+            if not any(s.get("status") == "created" for s in steps):
+                break
     except HTTPException as exc:
         return {"note": f"Could not queue that step: {exc.detail}", "queued": False}
 
     status = (last.get("task") or {}).get("status") or "created"
+    approval_id = ""
     if status == "waiting_approval":
+        try:
+            pending = await _local_task_request("GET", "/approvals")
+            for approval in pending if isinstance(pending, list) else []:
+                if isinstance(approval, dict) and approval.get("task_id") == task_id:
+                    approval_id = str(approval.get("approval_id") or "")
+                    break
+        except HTTPException:
+            approval_id = ""
         note = (
             f"Queued as task {task_id}; it is waiting for your approval before "
             "anything is sent."
@@ -551,7 +568,45 @@ async def _execute_call_action(call_id: str, action: dict) -> dict:
         note = f"Queued as task {task_id} and completed."
     else:
         note = f"Queued as task {task_id} ({status})."
-    return {"note": note, "task_id": task_id, "queued": True, "status": status}
+    return {
+        "note": note,
+        "task_id": task_id,
+        "approval_id": approval_id,
+        "queued": True,
+        "status": status,
+    }
+
+
+async def _resolve_pending_call_action(
+    call_id: str, pipeline, *, approve: bool
+) -> dict | None:
+    """Approve/reject the task queued by a confirmed call action, if any.
+
+    Returns None when this call has no queued task (the normal pipeline
+    pending-action flow then handles the utterance). Critical tools still need
+    their second factor: the task-runner returns 403/409 and that is reported
+    back instead of being bypassed.
+    """
+    session = pipeline.get_session(call_id) if pipeline is not None else None
+    pending = (session.metadata.get("pending_call_approval") if session else None) or {}
+    approval_id = pending.get("approval_id")
+    if not approval_id:
+        return None
+    action = "approve" if approve else "reject"
+    try:
+        outcome = await _local_task_request("POST", f"/approvals/{approval_id}/{action}")
+        if approve:
+            status = outcome.get("status") or "unknown"
+            task_id = outcome.get("task_id") or pending.get("task_id")
+            text = f"Approved. Task {task_id} is {status}."
+        else:
+            text = f"Rejected. Task {pending.get('task_id')} will not run."
+    except HTTPException as exc:
+        outcome = {"error": exc.detail}
+        text = f"I couldn't {action} that: {exc.detail}"
+    if session is not None:
+        session.metadata.pop("pending_call_approval", None)
+    return {"text": text, "result": outcome}
 
 
 def get_pipeline():
@@ -678,15 +733,40 @@ def _setup_hub_handlers(hub: WebSocketHub, pipeline) -> None:
         await pipeline.handle_call_end(call_id)
 
     async def handle_approve(msg: WSMessage) -> None:
-        """Phone approved an action."""
+        """Phone approved an action by voice."""
         call_id = msg.payload.get("call_id", "")
-        action_id = msg.payload.get("action_id", "")
-        result = await pipeline.handle_phone_message(call_id, "approve")
-        # Action execution happens via pipeline.on_action callback
+        pending = await _resolve_pending_call_action(call_id, pipeline, approve=True)
+        if pending is not None:
+            await hub.send_to_phones(
+                {
+                    "type": "voice_response",
+                    "payload": {
+                        "call_id": call_id,
+                        "text": pending["text"],
+                        "action": {"type": "approval_result", "result": pending["result"]},
+                    },
+                }
+            )
+            return
+        await pipeline.handle_phone_message(call_id, "approve")
+        # Response is already pushed by handle_phone_message
 
     async def handle_reject(msg: WSMessage) -> None:
-        """Phone rejected an action."""
+        """Phone rejected an action by voice."""
         call_id = msg.payload.get("call_id", "")
+        pending = await _resolve_pending_call_action(call_id, pipeline, approve=False)
+        if pending is not None:
+            await hub.send_to_phones(
+                {
+                    "type": "voice_response",
+                    "payload": {
+                        "call_id": call_id,
+                        "text": pending["text"],
+                        "action": {"type": "approval_result", "result": pending["result"]},
+                    },
+                }
+            )
+            return
         await pipeline.handle_phone_message(call_id, "no don't")
 
     hub.on("voice", handle_voice)

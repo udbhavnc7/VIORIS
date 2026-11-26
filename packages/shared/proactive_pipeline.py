@@ -474,6 +474,12 @@ class ProactiveCallPipeline:
                         ).strip()
                         result["task_id"] = outcome.get("task_id")
                         result["queued"] = outcome.get("queued", True)
+                        if outcome.get("approval_id"):
+                            result["approval_id"] = outcome["approval_id"]
+                            session.metadata["pending_call_approval"] = {
+                                "task_id": outcome.get("task_id"),
+                                "approval_id": outcome["approval_id"],
+                            }
                 except Exception as exc:
                     logger.warning("Call on_action callback failed: %s", exc)
                     result["response_text"] = (

@@ -95,11 +95,13 @@ class TestQueueThroughApprovalGate:
             (200, {"task_id": "t-42", "status": "created"}),
             (200, {"task_id": "t-42", "status": "running"}),
             (200, {"task": {"task_id": "t-42", "status": "waiting_approval"}}),
+            (200, [{"approval_id": "a-9", "task_id": "t-42", "tool": "system.send_message"}]),
         ]
         outcome = await gw._execute_call_action("call-1", MESSAGE)
 
         assert outcome["queued"] is True
         assert outcome["task_id"] == "t-42"
+        assert outcome["approval_id"] == "a-9"
         assert outcome["status"] == "waiting_approval"
         assert "waiting for your approval" in outcome["note"]
         assert "sent" not in outcome["note"].lower().replace("anything is sent", "")
@@ -108,6 +110,7 @@ class TestQueueThroughApprovalGate:
             ("POST", "http://127.0.0.1:8421/tasks"),
             ("POST", "http://127.0.0.1:8421/tasks/t-42/start"),
             ("POST", "http://127.0.0.1:8421/tasks/t-42/run"),
+            ("GET", "http://127.0.0.1:8421/approvals"),
         ]
         created = runner.calls[0][2]
         assert created["steps"][0]["tool"] == "system.send_message"
@@ -155,6 +158,75 @@ class TestQueueThroughApprovalGate:
         outcome = await gw._execute_call_action("call-6", MESSAGE)
         assert outcome["queued"] is False
         assert "nothing was executed" in outcome["note"]
+
+
+class _Session:
+    def __init__(self, metadata):
+        self.metadata = metadata
+
+
+class _Pipeline:
+    def __init__(self, session):
+        self._session = session
+
+    def get_session(self, call_id):
+        return self._session
+
+
+class TestVoiceApproval:
+    @pytest.mark.asyncio
+    async def test_approve_uses_the_tracked_approval_id(self, runner):
+        session = _Session(
+            {"pending_call_approval": {"task_id": "t-42", "approval_id": "a-9"}}
+        )
+        runner.responses.append((200, {"task_id": "t-42", "status": "completed"}))
+        outcome = await gw._resolve_pending_call_action(
+            "call-1", _Pipeline(session), approve=True
+        )
+        assert outcome["result"]["status"] == "completed"
+        assert "Approved" in outcome["text"]
+        assert runner.calls == [
+            ("POST", "http://127.0.0.1:8421/approvals/a-9/approve", None)
+        ]
+        assert "pending_call_approval" not in session.metadata
+
+    @pytest.mark.asyncio
+    async def test_reject_uses_the_tracked_approval_id(self, runner):
+        session = _Session(
+            {"pending_call_approval": {"task_id": "t-42", "approval_id": "a-9"}}
+        )
+        runner.responses.append((200, {"rejected": "a-9", "status": "cancelled"}))
+        outcome = await gw._resolve_pending_call_action(
+            "call-1", _Pipeline(session), approve=False
+        )
+        assert "Rejected" in outcome["text"]
+        assert runner.calls == [
+            ("POST", "http://127.0.0.1:8421/approvals/a-9/reject", None)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_tracked_approval_falls_back_to_pipeline(self, runner):
+        session = _Session({})
+        outcome = await gw._resolve_pending_call_action(
+            "call-1", _Pipeline(session), approve=True
+        )
+        assert outcome is None
+        assert runner.calls == []
+
+    @pytest.mark.asyncio
+    async def test_second_factor_failure_is_reported_not_bypassed(self, runner):
+        session = _Session(
+            {"pending_call_approval": {"task_id": "t-42", "approval_id": "a-9"}}
+        )
+        runner.responses.append(
+            (403, {"detail": "Critical action requires the second factor"})
+        )
+        outcome = await gw._resolve_pending_call_action(
+            "call-1", _Pipeline(session), approve=True
+        )
+        assert "couldn't approve" in outcome["text"]
+        assert "second factor" in outcome["text"]
+        assert "pending_call_approval" not in session.metadata
 
 
 def test_pipeline_is_wired_to_the_real_handler(monkeypatch):

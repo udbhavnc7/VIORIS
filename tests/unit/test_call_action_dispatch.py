@@ -84,6 +84,26 @@ async def test_sync_handler_reports_queueing_and_task_id():
 
 
 @pytest.mark.asyncio
+async def test_approval_id_is_tracked_for_voice_approval():
+    def handler(call_id, action):
+        return {
+            "note": "Queued as task t-42; waiting for approval.",
+            "task_id": "t-42",
+            "approval_id": "a-9",
+            "queued": True,
+        }
+
+    pipeline = _pipeline(on_action=handler)
+    session = _session(pipeline)
+    result = await pipeline.handle_phone_message("call-1", "yes")
+    assert result["approval_id"] == "a-9"
+    assert session.metadata["pending_call_approval"] == {
+        "task_id": "t-42",
+        "approval_id": "a-9",
+    }
+
+
+@pytest.mark.asyncio
 async def test_async_handler_is_awaited():
     async def handler(call_id, action):
         return {"note": "Queued asynchronously."}
