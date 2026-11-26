@@ -1,10 +1,11 @@
-  # Vioris — Roadmap to "Best Personal AI Agent" (Still $0)
+    # Vioris — Roadmap to "Best Personal AI Agent" (Still $0)
 
 You're closer than 25-30% would suggest. Phases 1-6 give you the *skeleton* of a real agentic OS — voice loop, planner, permission engine, memory, phone control, connectors. What's missing isn't more connectors. It's the handful of things that separate "a working agent" from "an agent you'd actually trust to touch your laptop while you're asleep." That's where the real 70% is.
 
 This doc is split into five parts:
 0. **The actual unlock** — how to get the "calls you while driving" experience you're picturing, fully within your $0 / no-Twilio constraint
 0.5. **The conversation itself** — what it actually takes to hold the multi-intent, decision-surfacing exchange in your example, not just place the call
+
 1. **What to add, and why it matters** (not generic feature bloat — things that directly serve your own core rule)
 2. **The free-stack upgrades** that make it faster and more capable without spending a rupee
 3. **A revised phase plan + sequential prompts** you can paste into your coding sessions one at a time, in your existing "one capability per prompt" style
@@ -98,7 +99,7 @@ Your core rule is: *"Vioris may observe broadly. It must act narrowly. It must n
 ## Part 2 — Free-Stack Upgrades (Still $0, Just Better Choices)
 
 | Area | Current plan | Upgrade | Why |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | STT | Whisper (local) | `faster-whisper` or `whisper.cpp` | Same model quality, several times faster on CPU-only laptops — matters a lot for a "wake and respond" feel |
 | Queue | Celery + Redis | Fine as-is, but consider `Huey` (SQLite-backed) for single-laptop dev before wiring full Celery | Fewer moving parts while you're still mid-build; promote to Celery+Redis once you actually need concurrent workers |
 | Vector store | Postgres + pgvector | Keep pgvector for the "real" build, but `sqlite-vec` is a good zero-infra option for local dev loops | Less friction during iteration; both are $0 either way — this is about complexity, not cost |
@@ -113,20 +114,23 @@ Your core rule is: *"Vioris may observe broadly. It must act narrowly. It must n
 Keep your existing rule: **one capability per prompt, never skip ahead.** Below, Phase 7 and 8 are your own phases fleshed out with the above; Phase 9 and 10 are new.
 
 ### Phase 7 — Specialist Agents + Intelligence Upgrades
+
 1. `Add a lightweight intent-classification pass using a small local model (Phi-3-mini or Gemma2 2B) that routes simple Observe-tier requests away from the full planner model, with a fallback to the full planner on low classifier confidence.`
 2. `Integrate a local vision-language model (Moondream or Qwen2-VL via Ollama) as a new Observe-tier tool that can describe/reason about the current screen, registered alongside the existing OCR tool rather than replacing it.`
 3. `Split the Phase 4 memory store into two collections: episodic (timestamped task/event history) and semantic (facts/preferences), with separate retrieval paths, and update the RAG query planner to pick the right collection based on query type.`
 4. `Build an opt-in "routine suggestion" module that mines local task history for repeated action sequences and surfaces them as Prepare-tier suggestions the user must explicitly approve before any automation is created.`
 
 ### Phase 8 — Trust Hardening + Safety Suite (do this before any wider rollout)
+
 5. `Implement a local speaker-verification check (SpeechBrain ECAPA-TDNN or Resemblyzer) as the second factor for Critical-tier actions, wired into the existing permission engine's second-factor hook.`
-6. `Add a dedicated "kill phrase" listener at the wake-word layer that can halt any in-progress Execute/Critical task immediately, independent of the planner/LLM pipeline.`
-7. `Extend the audit event schema to capture the reasoning/alternatives considered for each plan step, and add a query tool that lets the user ask "why did you do X" against the audit log via RAG.`
-8. `Add a staged-execution/undo layer for reversible Critical actions (delete-to-trash, delayed send with cancel window) instead of immediate irreversible execution.`
-9. `Write an adversarial test suite specifically for prompt injection via the browser/email agents: pages and emails containing embedded instructions, and assertions that the permission engine cannot be bypassed by anything the agent merely observes.`
-10. `Add idempotency checks to task retries so a retried Execute/Critical step re-validates permission and re-diffs against current state rather than replaying a stale approval.`
+2. `Add a dedicated "kill phrase" listener at the wake-word layer that can halt any in-progress Execute/Critical task immediately, independent of the planner/LLM pipeline.`
+3. `Extend the audit event schema to capture the reasoning/alternatives considered for each plan step, and add a query tool that lets the user ask "why did you do X" against the audit log via RAG.`
+4. `Add a staged-execution/undo layer for reversible Critical actions (delete-to-trash, delayed send with cancel window) instead of immediate irreversible execution.`
+5. `Write an adversarial test suite specifically for prompt injection via the browser/email agents: pages and emails containing embedded instructions, and assertions that the permission engine cannot be bypassed by anything the agent merely observes.`
+6. `Add idempotency checks to task retries so a retried Execute/Critical step re-validates permission and re-diffs against current state rather than replaying a stale approval.`
 
 ### Phase 8.5 — The Call Experience (build this right after trust hardening, before infra scaling)
+
 10a. `Add a "ring" event: a new WebSocket push from the backend that tells the Flutter app to display a full-screen incoming-call UI (Android full-screen intent notification / iOS CallKit), answerable with a single tap.`
 10b. `Implement bidirectional audio streaming over the existing WebSocket/Tailscale channel once a call is answered — Piper TTS output to the phone, Whisper transcription of the user's spoken replies back to the planner.`
 10c. `Extend the Contacts connector and semantic memory schema with a relationship field (e.g. "spouse," "manager") so a spoken name resolves to the right contact and the right channel without the user specifying it.`
@@ -134,6 +138,7 @@ Keep your existing rule: **one capability per prompt, never skip ahead.** Below,
 10e. `Build a scheduled/triggered proactive-digest capability ("call me when a phase finishes," "check in at 7pm") that uses the Phase 7 routine-suggestion module to decide when to initiate a call rather than wait to be spoken to.`
 
 ### Phase 8.6 — Dialogue Orchestrator (build and test this before wiring the call UI)
+
 10f. `Build a call-scoped conversation context object that stores recent entities and tool results for a session, with a reference-resolution step that maps pronouns/definite references ("the mail," "her," "that") onto it.`
 10g. `Add multi-intent decomposition to the understanding step so a single utterance can be split into multiple parallel sub-intents, each dispatched to its own tool/agent rather than forced through one task.`
 10h. `Add an actionability-flagging pass over Observe-tier query results that detects items which look like they need a response and surfaces that as a question, without drafting or sending anything.`
@@ -145,16 +150,16 @@ Keep your existing rule: **one capability per prompt, never skip ahead.** Below,
 *This phase can be built and tested against your existing Phase 1 web console / single-turn voice interface before the Phase 8.5 call UI exists — wire the two together once each works independently.*
 
 ### Phase 9 — Infrastructure Wiring (the "not yet built" list)
-11. `Wire up the existing Celery + Redis task queue for real background execution of long-running tasks, replacing any synchronous stand-ins.`
-12. `Write and test the PostgreSQL migration runner so schema changes apply automatically instead of manually.`
-13. `Integrate Tailscale for phone-to-laptop connectivity per the existing design, replacing any temporary local-network-only access.`
-14. `Add Groq free-tier and OpenRouter free-tier models as additional hosted LLM fallbacks alongside the existing Gemini free-tier fallback, with automatic failover on rate limit.`
+ 1. `Wire up the existing Celery + Redis task queue for real background execution of long-running tasks, replacing any synchronous stand-ins.`
+ 2. `Write and test the PostgreSQL migration runner so schema changes apply automatically instead of manually.`
+ 3. `Integrate Tailscale for phone-to-laptop connectivity per the existing design, replacing any temporary local-network-only access.`
+ 4. `Add Groq free-tier and OpenRouter free-tier models as additional hosted LLM fallbacks alongside the existing Gemini free-tier fallback, with automatic failover on rate limit.`
 
 ### Phase 10 — Resilience & Polish
-15. `Add a graceful-degradation mode that falls back to text-only interaction when Ollama or the wake-word model is unavailable or too slow.`
-16. `Swap the Whisper STT backend to faster-whisper (or whisper.cpp) for lower-latency local transcription, keeping the existing interface unchanged.`
-17. `Add Tesseract as the OCR backend feeding the new vision-language tool, so screen text extraction and screen reasoning share a consistent pipeline.`
-18. `Build a "why did you do that" voice-queryable explainability view in the web console / Flutter app that surfaces the reasoning trace from the audit log.`
+ 1. `Add a graceful-degradation mode that falls back to text-only interaction when Ollama or the wake-word model is unavailable or too slow.`
+ 2. `Swap the Whisper STT backend to faster-whisper (or whisper.cpp) for lower-latency local transcription, keeping the existing interface unchanged.`
+ 3. `Add Tesseract as the OCR backend feeding the new vision-language tool, so screen text extraction and screen reasoning share a consistent pipeline.`
+ 4. `Build a "why did you do that" voice-queryable explainability view in the web console / Flutter app that surfaces the reasoning trace from the audit log.`
 
 ---
 
