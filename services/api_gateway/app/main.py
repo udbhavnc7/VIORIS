@@ -482,8 +482,26 @@ def _action_to_steps(action: dict) -> list[dict] | None:
                 ),
             }
         ]
-    # Resuming a task needs its task id, not just a spoken summary; open_app /
-    # react / send_mail already state that no transport is connected.
+    if kind == "react":
+        message_id = str(action.get("message_id") or "").strip()
+        reaction = str(action.get("reaction") or "").strip().lower()
+        if not message_id or not reaction:
+            return None
+        return [
+            {
+                "agent": "gmail",
+                "tool": "gmail.react",
+                "args": {"message_id": message_id, "reaction": reaction},
+                "reasoning": (
+                    "Confirmed during a call. Gmail reactions are reversible label "
+                    "changes but still externally visible, so the task runner pauses "
+                    "for explicit approval before touching the mailbox."
+                ),
+            }
+        ]
+    # Resuming a task needs its task id, not just a spoken summary; open_app has
+    # no reliable app-name mapping, and there is no send-new-mail tool (only
+    # replies to an existing thread).
     return None
 
 
@@ -518,10 +536,13 @@ async def _execute_call_action(call_id: str, action: dict) -> dict:
     """
     steps = _action_to_steps(action)
     if not steps:
-        return {
-            "note": "I can't queue that action from a call yet — nothing was executed.",
-            "queued": False,
-        }
+        note = "I can't queue that action from a call yet — nothing was executed."
+        if (action or {}).get("type") == "send_mail":
+            note = (
+                "I can only reply inside an existing thread — there is no tool to "
+                "send a brand-new email, so nothing was sent."
+            )
+        return {"note": note, "queued": False}
 
     description = str(action.get("description") or action.get("type") or "call action")
     try:
@@ -551,6 +572,7 @@ async def _execute_call_action(call_id: str, action: dict) -> dict:
 
     status = (last.get("task") or {}).get("status") or "created"
     approval_id = ""
+    verb = "applied" if (action or {}).get("type") == "react" else "sent"
     if status == "waiting_approval":
         try:
             pending = await _local_task_request("GET", "/approvals")
@@ -562,7 +584,7 @@ async def _execute_call_action(call_id: str, action: dict) -> dict:
             approval_id = ""
         note = (
             f"Queued as task {task_id}; it is waiting for your approval before "
-            "anything is sent."
+            f"anything is {verb}."
         )
     elif status == "completed":
         note = f"Queued as task {task_id} and completed."
@@ -703,7 +725,27 @@ def _setup_hub_handlers(hub: WebSocketHub, pipeline) -> None:
         text = msg.payload.get("text", "")
         if not call_id or not text:
             return
-        result = await pipeline.handle_phone_message(call_id, text)
+        # A bare "yes"/"no" resolves the task queued by an earlier confirmation
+        # before it is treated as a fresh utterance. A newly prepared action
+        # still owns the utterance, so the pipeline's pending list wins.
+        from packages.shared.proactive_pipeline import (
+            APPROVAL_UTTERANCES,
+            REJECTION_UTTERANCES,
+        )
+
+        utterance = text.strip().lower()
+        session = pipeline.get_session(call_id) if pipeline else None
+        if not (session and getattr(session, "pending_actions", None)):
+            approve = utterance in APPROVAL_UTTERANCES
+            reject = utterance in REJECTION_UTTERANCES
+            if approve or reject:
+                resolved = await _resolve_pending_call_action(
+                    call_id, pipeline, approve=approve
+                )
+                if resolved is not None:
+                    await _send_approval_result(call_id, resolved)
+                    return
+        await pipeline.handle_phone_message(call_id, text)
         # Response is already pushed by handle_phone_message
 
     async def handle_call_accept(msg: WSMessage) -> None:
@@ -732,21 +774,24 @@ def _setup_hub_handlers(hub: WebSocketHub, pipeline) -> None:
         call_id = msg.payload.get("call_id", "")
         await pipeline.handle_call_end(call_id)
 
+    async def _send_approval_result(call_id: str, pending: dict) -> None:
+        await hub.send_to_phones(
+            {
+                "type": "voice_response",
+                "payload": {
+                    "call_id": call_id,
+                    "text": pending["text"],
+                    "action": {"type": "approval_result", "result": pending["result"]},
+                },
+            }
+        )
+
     async def handle_approve(msg: WSMessage) -> None:
         """Phone approved an action by voice."""
         call_id = msg.payload.get("call_id", "")
         pending = await _resolve_pending_call_action(call_id, pipeline, approve=True)
         if pending is not None:
-            await hub.send_to_phones(
-                {
-                    "type": "voice_response",
-                    "payload": {
-                        "call_id": call_id,
-                        "text": pending["text"],
-                        "action": {"type": "approval_result", "result": pending["result"]},
-                    },
-                }
-            )
+            await _send_approval_result(call_id, pending)
             return
         await pipeline.handle_phone_message(call_id, "approve")
         # Response is already pushed by handle_phone_message
@@ -756,16 +801,7 @@ def _setup_hub_handlers(hub: WebSocketHub, pipeline) -> None:
         call_id = msg.payload.get("call_id", "")
         pending = await _resolve_pending_call_action(call_id, pipeline, approve=False)
         if pending is not None:
-            await hub.send_to_phones(
-                {
-                    "type": "voice_response",
-                    "payload": {
-                        "call_id": call_id,
-                        "text": pending["text"],
-                        "action": {"type": "approval_result", "result": pending["result"]},
-                    },
-                }
-            )
+            await _send_approval_result(call_id, pending)
             return
         await pipeline.handle_phone_message(call_id, "no don't")
 

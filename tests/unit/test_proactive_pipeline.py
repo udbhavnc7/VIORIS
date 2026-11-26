@@ -294,14 +294,16 @@ class TestProactiveCallPipeline:
         assert result["response_text"] == "Call not found"
 
     @pytest.mark.asyncio
-    async def test_handle_phone_message_emoji_reaction(self):
+    async def test_handle_phone_message_emoji_reaction_without_target_is_refused(self):
         hub = FakeHub()
         pipeline = ProactiveCallPipeline(hub=hub, gmail=FakeGmail(connected=False))
         pipeline._schedule.trigger_hours = [datetime.now(UTC).hour]
         call_id = await pipeline.tick()
 
         result = await pipeline.handle_phone_message(call_id, "react with thumbs up")
-        assert "👍" in result["response_text"]
+        # No email item means no message id: refuse rather than invent a target.
+        assert "can't apply a reaction" in result["response_text"]
+        assert "Nothing was changed" in result["response_text"]
 
     @pytest.mark.asyncio
     async def test_get_active_sessions(self):

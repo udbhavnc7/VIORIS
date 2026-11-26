@@ -50,6 +50,15 @@ MESSAGE = {
     "description": "message to Disha",
 }
 
+REACT = {
+    "type": "react",
+    "reaction": "acknowledge",
+    "target": "Disha",
+    "message_id": "msg-123",
+    "status": "not_executed",
+    "description": "acknowledge on Disha's mail",
+}
+
 
 class TestActionMapping:
     def test_message_maps_to_registered_execute_tool(self):
@@ -64,11 +73,22 @@ class TestActionMapping:
         ]
         assert "Execute-tier" in steps[0]["reasoning"]
 
+    def test_react_maps_to_registered_execute_tool(self):
+        steps = gw._action_to_steps(REACT)
+        assert steps == [
+            {
+                "agent": "gmail",
+                "tool": "gmail.react",
+                "args": {"message_id": "msg-123", "reaction": "acknowledge"},
+                "reasoning": steps[0]["reasoning"],
+            }
+        ]
+        assert "approval" in steps[0]["reasoning"]
+
     @pytest.mark.parametrize(
         "action",
         [
             {"type": "continue_task", "task": "deploy"},
-            {"type": "react", "reaction": "👍"},
             {"type": "send_mail", "recipient": "x"},
             {"type": "open_app", "target": "gmail"},
             {},
@@ -82,9 +102,11 @@ class TestActionMapping:
         [
             {"type": "message", "contact": "", "message": "hi"},
             {"type": "message", "contact": "Disha", "message": "  "},
+            {"type": "react", "reaction": "acknowledge"},
+            {"type": "react", "message_id": "msg-123", "reaction": "  "},
         ],
     )
-    def test_incomplete_message_is_refused(self, action):
+    def test_incomplete_actions_are_refused(self, action):
         assert gw._action_to_steps(action) is None
 
 
@@ -135,6 +157,38 @@ class TestQueueThroughApprovalGate:
         assert outcome["queued"] is False
         assert "nothing was executed" in outcome["note"]
         assert runner.calls == []
+
+    @pytest.mark.asyncio
+    async def test_send_mail_refusal_names_the_missing_tool(self, runner):
+        outcome = await gw._execute_call_action(
+            "call-3", {"type": "send_mail", "recipient": "Disha", "email": "d@example.com"}
+        )
+        assert outcome["queued"] is False
+        assert "reply inside an existing thread" in outcome["note"]
+        assert "nothing was sent" in outcome["note"]
+        assert runner.calls == []
+
+    @pytest.mark.asyncio
+    async def test_react_creates_task_and_stops_at_gate(self, runner):
+        runner.responses += [
+            (200, {"task_id": "t-44"}),
+            (200, {"task_id": "t-44"}),
+            (200, {"task": {"task_id": "t-44", "status": "waiting_approval"}}),
+            (200, [{"approval_id": "a-10", "task_id": "t-44", "tool": "gmail.react"}]),
+        ]
+        outcome = await gw._execute_call_action("call-7", REACT)
+
+        assert outcome["queued"] is True
+        assert outcome["approval_id"] == "a-10"
+        assert "waiting for your approval" in outcome["note"]
+        assert "anything is applied" in outcome["note"]
+        created = runner.calls[0][2]
+        assert created["steps"][0]["tool"] == "gmail.react"
+        assert created["steps"][0]["args"] == {
+            "message_id": "msg-123",
+            "reaction": "acknowledge",
+        }
+        assert all("approve" not in call[1] for call in runner.calls)
 
     @pytest.mark.asyncio
     async def test_runner_rejection_is_surfaced(self, runner):
@@ -234,3 +288,94 @@ def test_pipeline_is_wired_to_the_real_handler(monkeypatch):
     pipeline = gw.get_pipeline()
     assert pipeline.on_action is gw._execute_call_action
     monkeypatch.setattr(gw, "_pipeline", None)
+
+
+class _RecordingPipeline:
+    def __init__(self, session):
+        self._session = session
+        self.utterances = []
+
+    def get_session(self, call_id):
+        return self._session
+
+    async def handle_phone_message(self, call_id, text):
+        self.utterances.append((call_id, text))
+        return {"response_text": "pipeline handled", "action": None}
+
+
+def _voice_handler(pipeline):
+    from services.api.app.websocket import WebSocketHub
+
+    hub = WebSocketHub()
+    gw._setup_hub_handlers(hub, pipeline)
+    return hub, hub._handlers["voice"][0]
+
+
+def _voice_message(text, call_id="call-1"):
+    from services.api.app.websocket import WSMessage
+
+    return WSMessage(type="voice", payload={"call_id": call_id, "text": text})
+
+
+class TestSpokenApproval:
+    @pytest.mark.asyncio
+    async def test_spoken_yes_resolves_the_tracked_approval(self, runner):
+        session = _Session(
+            {"pending_call_approval": {"task_id": "t-42", "approval_id": "a-9"}}
+        )
+        pipeline = _RecordingPipeline(session)
+        hub, handler = _voice_handler(pipeline)
+        runner.responses.append((200, {"task_id": "t-42", "status": "completed"}))
+
+        await handler(_voice_message("yes"))
+
+        assert runner.calls == [
+            ("POST", "http://127.0.0.1:8421/approvals/a-9/approve", None)
+        ]
+        assert pipeline.utterances == []
+        assert "pending_call_approval" not in session.metadata
+        assert hub._message_queue.empty()  # nothing stray queued
+
+    @pytest.mark.asyncio
+    async def test_spoken_no_rejects_the_tracked_approval(self, runner):
+        session = _Session(
+            {"pending_call_approval": {"task_id": "t-42", "approval_id": "a-9"}}
+        )
+        pipeline = _RecordingPipeline(session)
+        _hub, handler = _voice_handler(pipeline)
+        runner.responses.append((200, {"rejected": "a-9", "status": "cancelled"}))
+
+        await handler(_voice_message("no don't"))
+
+        assert runner.calls == [
+            ("POST", "http://127.0.0.1:8421/approvals/a-9/reject", None)
+        ]
+        assert pipeline.utterances == []
+
+    @pytest.mark.asyncio
+    async def test_prepared_action_still_owns_the_utterance(self, runner):
+        session = _Session(
+            {"pending_call_approval": {"task_id": "t-42", "approval_id": "a-9"}}
+        )
+        session.pending_actions = [{"type": "message", "contact": "Disha"}]
+        pipeline = _RecordingPipeline(session)
+        _hub, handler = _voice_handler(pipeline)
+
+        await handler(_voice_message("yes"))
+
+        assert runner.calls == []
+        assert pipeline.utterances == [("call-1", "yes")]
+
+    @pytest.mark.asyncio
+    async def test_non_approval_utterance_goes_to_the_pipeline(self, runner):
+        session = _Session(
+            {"pending_call_approval": {"task_id": "t-42", "approval_id": "a-9"}}
+        )
+        pipeline = _RecordingPipeline(session)
+        _hub, handler = _voice_handler(pipeline)
+
+        await handler(_voice_message("what's in my inbox"))
+
+        assert runner.calls == []
+        assert pipeline.utterances == [("call-1", "what's in my inbox")]
+

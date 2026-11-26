@@ -87,6 +87,23 @@ _DEMO_CONTACTS = [
     ),
 ]
 
+#: Gmail has no emoji reactions. Only the two spoken reactions with an honest,
+#: reversible label equivalent are mapped; anything else is refused rather than
+#: inventing a mailbox change the user did not ask for. The connector's own
+#: vocabulary (acknowledge/star/unstar/mark_read/mark_unread) stays authoritative.
+_GMAIL_REACTION_FOR_EMOJI: dict[str, str] = {
+    "👍": "acknowledge",  # star + mark read
+    "❤️": "star",
+}
+
+#: Bare confirmations/cancellations a phone can speak. Module-level so the
+#: gateway resolves a task approval with the exact same vocabulary the pipeline
+#: uses for prepared actions — no second, drifting list.
+APPROVAL_UTTERANCES = frozenset(
+    {"yes", "go on", "approve", "do it", "send it", "confirm"}
+)
+REJECTION_UTTERANCES = frozenset({"no don't", "cancel", "reject", "don't"})
+
 
 class CallRole(Enum):
     LAPTOP = "laptop"  # the server side
@@ -224,7 +241,7 @@ class ProactiveCallPipeline:
         call_id = str(uuid.uuid4())[:8]
         logger.info("Digest triggered, starting call %s", call_id)
 
-        session = await self._start_call(call_id, driving_scenario=False)
+        await self._start_call(call_id, driving_scenario=False)
         return call_id
 
     @staticmethod
@@ -718,7 +735,7 @@ class ProactiveCallPipeline:
             }
 
         # ── Approve / confirm action ──
-        if lower in ("yes", "go on", "approve", "do it", "send it", "confirm"):
+        if lower in APPROVAL_UTTERANCES:
             if session.pending_actions:
                 action = session.pending_actions.pop(0)
                 session.status = DigestStatus.RESPONSE_RECEIVED
@@ -734,7 +751,7 @@ class ProactiveCallPipeline:
             }
 
         # ── Reject / cancel ──
-        if lower in ("no don't", "cancel", "reject", "don't"):
+        if lower in REJECTION_UTTERANCES:
             if session.pending_actions:
                 session.pending_actions.pop(0)
                 return {
@@ -808,18 +825,43 @@ class ProactiveCallPipeline:
                 or (self._sender_from_summary(target.summary) if target else "")
                 or "the email"
             )
+            message_id = (target.reference_id if target else "") or ""
+            mail_reaction = _GMAIL_REACTION_FOR_EMOJI.get(reaction)
+            if not message_id:
+                return {
+                    "response_text": (
+                        f"I don't have a message id for {target_name}'s mail, so I "
+                        "can't apply a reaction. Nothing was changed."
+                    ),
+                    "action": None,
+                    "digest_status": "awaiting_response",
+                }
+            if not mail_reaction:
+                return {
+                    "response_text": (
+                        f"Gmail can't send a {reaction} reaction — it can only star, "
+                        "unstar, or mark a message read. Nothing was changed."
+                    ),
+                    "action": None,
+                    "digest_status": "awaiting_response",
+                }
+            session.pending_actions.append(
+                {
+                    "type": "react",
+                    "reaction": mail_reaction,
+                    "target": target_name,
+                    "message_id": message_id,
+                    "status": "not_executed",
+                    "description": f"{mail_reaction} on {target_name}'s mail",
+                }
+            )
             return {
                 "response_text": (
-                    f"I've prepared a {reaction} reaction to {target_name}'s mail. "
-                    "It has not been applied — no mail write transport is connected."
+                    f"Gmail has no emoji reactions, so I've prepared '{mail_reaction}' "
+                    f"on {target_name}'s mail instead. Nothing has been changed — "
+                    "should I apply it?"
                 ),
-                "action": {
-                    "type": "react",
-                    "reaction": reaction,
-                    "target": target_name,
-                    "reference_id": target.reference_id if target else "",
-                    "status": "not_executed",
-                },
+                "action": None,
                 "digest_status": "awaiting_response",
             }
 

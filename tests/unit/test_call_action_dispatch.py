@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from packages.shared.call_experience import ProactiveDigest
 from packages.shared.contacts import Contact
 from packages.shared.proactive_pipeline import (
     CallSession,
@@ -123,6 +124,118 @@ async def test_handler_failure_is_surfaced_not_silently_ignored():
     _session(pipeline)
     result = await pipeline.handle_phone_message("call-1", "yes")
     assert "Could not queue that step: transport offline" in result["response_text"]
+
+
+def _email_session(pipeline, *, message_id="msg-123", call_id="call-1"):
+    session = CallSession(call_id=call_id, source=RingSource.PROACTIVE)
+    session.digest = ProactiveDigest(
+        call_id=call_id,
+        items=[
+            DigestItem(
+                item_type="email",
+                summary="From Disha: Re: Dinner",
+                source="gmail",
+                actionable=True,
+                sender="Disha",
+                subject="Re: Dinner",
+                channel="email",
+                reference_id=message_id,
+            )
+        ],
+    )
+    pipeline._sessions[call_id] = session
+    return session
+
+
+@pytest.mark.asyncio
+async def test_react_proposes_a_reversible_label_change_and_asks_first():
+    pipeline = _pipeline()
+    session = _email_session(pipeline)
+
+    result = await pipeline.handle_phone_message("call-1", "react thumbs up")
+
+    assert result["action"] is None
+    assert "Nothing has been changed" in result["response_text"]
+    assert "should i apply it?" in result["response_text"].lower()
+    assert session.pending_actions == [
+        {
+            "type": "react",
+            "reaction": "acknowledge",
+            "target": "Disha",
+            "message_id": "msg-123",
+            "status": "not_executed",
+            "description": "acknowledge on Disha's mail",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_heart_maps_to_star():
+    pipeline = _pipeline()
+    session = _email_session(pipeline)
+    await pipeline.handle_phone_message("call-1", "react with love")
+    assert session.pending_actions[0]["reaction"] == "star"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_emoji_is_refused_without_preparing_anything():
+    pipeline = _pipeline()
+    session = _email_session(pipeline)
+
+    result = await pipeline.handle_phone_message("call-1", "react with a laugh")
+
+    assert result["action"] is None
+    assert session.pending_actions == []
+    assert "can't send" in result["response_text"]
+    assert "Nothing was changed" in result["response_text"]
+
+
+@pytest.mark.asyncio
+async def test_react_without_a_message_id_is_refused():
+    pipeline = _pipeline()
+    session = _email_session(pipeline, message_id="")
+
+    result = await pipeline.handle_phone_message("call-1", "react thumbs up")
+
+    assert session.pending_actions == []
+    assert "message id" in result["response_text"]
+    assert "Nothing was changed" in result["response_text"]
+
+
+@pytest.mark.asyncio
+async def test_confirmed_react_is_queued_through_the_handler():
+    calls = []
+
+    def handler(call_id, action):
+        calls.append(action)
+        return {
+            "note": "Queued as task t-7; waiting for approval.",
+            "task_id": "t-7",
+            "approval_id": "a-1",
+            "queued": True,
+        }
+
+    pipeline = _pipeline(on_action=handler)
+    session = _email_session(pipeline)
+    await pipeline.handle_phone_message("call-1", "react thumbs up")
+    result = await pipeline.handle_phone_message("call-1", "yes")
+
+    assert calls == [
+        {
+            "type": "react",
+            "reaction": "acknowledge",
+            "target": "Disha",
+            "message_id": "msg-123",
+            "status": "not_executed",
+            "description": "acknowledge on Disha's mail",
+        }
+    ]
+    assert result["queued"] is True
+    assert result["approval_id"] == "a-1"
+    assert session.metadata["pending_call_approval"] == {
+        "task_id": "t-7",
+        "approval_id": "a-1",
+    }
 
 
 @pytest.mark.asyncio
