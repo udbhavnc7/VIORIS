@@ -153,8 +153,6 @@ class DocumentsAgent:
             return self._refuse("file.delete", "outside-allowlist", {"path": path})
         if not target.exists():
             return DocsOutcome(tool="file.delete", ok=False, note="no such file")
-        if not target.is_file():
-            return DocsOutcome(tool="file.delete", ok=False, note="not a file")
         root = self._containing_root(target)
         if root is None:
             return self._refuse("file.delete", "outside-allowlist", {"path": path})
