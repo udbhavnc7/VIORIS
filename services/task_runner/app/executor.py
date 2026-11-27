@@ -208,6 +208,7 @@ def make_executor(
             "computer.remote_input",
             "computer.capture_screenshot",
             "computer.read_screen_text",
+            "computer.describe_screen",
             "computer.list_windows",
             "computer.open_app",
             "computer.lock_workstation",
@@ -275,6 +276,9 @@ def _call_computer(tool: str, args: dict, base: str) -> dict:
     elif tool == "computer.read_screen_text":
         url = f"{base}/screen-text"
         payload = None
+    elif tool == "computer.describe_screen":
+        url = f"{base}/screen-describe"
+        payload = {"question": args.get("question") or None}
     elif tool == "computer.list_windows":
         url = f"{base}/windows"
         payload = None

@@ -49,6 +49,13 @@ def planner():
         ("list open windows", "computer.list_windows", {}, "observe"),
         ("take a screenshot", "computer.capture_screenshot", {}, "observe"),
         ("read the screen", "computer.read_screen_text", {}, "observe"),
+        ("describe the screen", "computer.describe_screen", {}, "observe"),
+        (
+            "what does this error say?",
+            "computer.describe_screen",
+            {"question": "what does this error say?"},
+            "observe",
+        ),
         ("read the page", "browser.read_page", {}, "observe"),
         ("search files for budget", "file.search_files", {"query": "budget"}, "observe"),
     ],

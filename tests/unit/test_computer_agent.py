@@ -8,6 +8,7 @@ from agents.computer.app.agent import ComputerAgent, PermissionBlockedError
 from agents.computer.app.vision import VisionError
 from agents.computer.app.windows import WindowLookupError
 from packages.shared.permission_engine import PermissionEngine, register_phase3_tools
+from packages.shared.vision_model import ScreenDescription, ScreenElement
 
 register_phase3_tools()
 
@@ -125,6 +126,72 @@ class TestReadScreenText:
         assert "<untrusted_data>" in out.detail["text"]
         assert out.detail["untrusted"]["source"] == "screen"
         assert out.detail["untrusted"]["location"] == "live screen"
+
+
+class TestDescribeScreen:
+    def test_local_vlm_describes_a_fresh_frame(self, tmp_path):
+        calls = []
+
+        def fake_vlm(image, question):
+            calls.append((image, question))
+            return ScreenDescription(
+                description="An error dialog says the download failed",
+                elements=[
+                    ScreenElement(
+                        label="error dialog", text="download failed", actionable=False
+                    )
+                ],
+                reasoning="The dialog reports a failure; retrying would be a separate action.",
+                model="llava:7b",
+            )
+
+        out = make_agent(tmp_path, vlm_describe_fn=fake_vlm).describe_screen(
+            "What does the error say?"
+        )
+        assert out.ok and out.verified
+        assert out.detail["description"] == "An error dialog says the download failed"
+        assert out.detail["elements"][0]["label"] == "error dialog"
+        assert out.detail["model"] == "llava:7b"
+        assert calls[0][0].startswith(b"\x89PNG")  # a freshly captured frame
+        assert calls[0][1] == "What does the error say?"
+        # VLM output is observed data, never a user command.
+        assert "[UNTRUSTED DATA" in out.detail["text"]
+        assert out.detail["untrusted"]["source"] == "screen_vlm"
+
+    def test_no_frame_means_no_vlm_call(self, tmp_path):
+        calls = []
+
+        def fake_vlm(image, question):
+            calls.append(image)
+            return ScreenDescription(description="impossible")
+
+        out = make_agent(
+            tmp_path, fail="screenshot", vlm_describe_fn=fake_vlm
+        ).describe_screen()
+        assert not out.ok
+        assert "no pixels" in out.error
+        assert calls == []
+
+    def test_vlm_backend_failure_is_reported_not_fantasy(self, tmp_path):
+        def fake_vlm(image, question):
+            return ScreenDescription(
+                description="VLM request failed: connection refused",
+                raw_response="connection refused",
+            )
+
+        out = make_agent(tmp_path, vlm_describe_fn=fake_vlm).describe_screen()
+        assert not out.ok
+        assert not out.verified
+        assert "connection refused" in out.error
+
+    def test_vlm_exception_is_a_typed_failure(self, tmp_path):
+        def boom(image, question):
+            raise RuntimeError("ollama not installed")
+
+        out = make_agent(tmp_path, vlm_describe_fn=boom).describe_screen()
+        assert not out.ok
+        assert "ollama not installed" in out.error
+        assert out.detail == {}
 
 
 class TestLockWorkstation:

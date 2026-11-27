@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from packages.shared.permission_engine import UnknownToolError
+from packages.shared.untrusted_content import UntrustedContent
+from packages.shared.vision_model import ScreenDescription, VisionLanguageModel
 
 from .vision import default_ocr, default_screenshot
 from .windows import default_list_windows, default_lock_workstation, default_open_app
@@ -32,6 +34,15 @@ from .windows import default_list_windows, default_lock_workstation, default_ope
 logger = logging.getLogger(__name__)
 
 SCREENSHOT_DIR = Path("vioris_data/screenshots")
+
+# The VLM reports backend failures as a description instead of raising; those
+# strings must never be mistaken for a successful observation.
+_VLM_FAILURE_MARKERS = ("VLM request failed:", "VLM error:", "Empty screenshot provided")
+
+
+def _default_vlm_describe(image: bytes, question: str | None) -> ScreenDescription:
+    """Describe a captured frame with the local Ollama vision model."""
+    return VisionLanguageModel().describe_screen(image, question)
 
 
 class PermissionBlockedError(Exception):
@@ -60,6 +71,7 @@ class ComputerAgent:
         ocr_fn: Callable[[Path], str] | None = None,
         open_app_fn: Callable[[str], None] | None = None,
         lock_workstation_fn: Callable[[], None] | None = None,
+        vlm_describe_fn: Callable[[bytes, str | None], ScreenDescription] | None = None,
     ) -> None:
         self._screenshot_dir = Path(screenshot_dir or SCREENSHOT_DIR)
         self._list_windows = list_windows_fn or default_list_windows
@@ -67,6 +79,7 @@ class ComputerAgent:
         self._ocr = ocr_fn or default_ocr
         self._open_app = open_app_fn or default_open_app
         self._lock_workstation = lock_workstation_fn or default_lock_workstation
+        self._vlm_describe = vlm_describe_fn or _default_vlm_describe
         self._executions: list[str] = []
 
     # ── tools ────────────────────────────────────────────────────────────
@@ -174,6 +187,63 @@ class ComputerAgent:
         if not path:
             return None
         return Path(path).read_bytes()
+
+    def describe_screen(self, question: str | None = None) -> ActionOutcome:
+        """OBSERVE: reason about a fresh screenshot with the local VLM.
+
+        The VLM may only describe/report. Anything it says is observed data
+        (often containing text written by another app), so it is quarantined
+        with provenance exactly like OCR output — never treated as a command.
+        """
+        if question is not None:
+            question = question.strip() or None
+        image = self.capture_screenshot_bytes()
+        if image is None:
+            return ActionOutcome(
+                tool="computer.describe_screen",
+                ok=False,
+                note="screenshot failed",
+                error="screenshot backend returned no pixels",
+                verified_note="no frame was available for the VLM",
+            )
+        try:
+            description = self._vlm_describe(image, question)
+        except Exception as exc:  # noqa: BLE001 — backend failure becomes a typed error
+            return ActionOutcome(
+                tool="computer.describe_screen",
+                ok=False,
+                note="VLM unavailable",
+                error=str(exc),
+                verified_note="VLM backend did not return a description",
+            )
+
+        text = (description.description or "").strip()
+        if not text or any(marker in text for marker in _VLM_FAILURE_MARKERS):
+            return ActionOutcome(
+                tool="computer.describe_screen",
+                ok=False,
+                note="VLM did not describe the screen",
+                error=description.raw_response or text or "empty description",
+                verified_note="VLM did not return a usable description",
+            )
+
+        self._executions.append("computer.describe_screen")
+        observed = UntrustedContent(
+            source="screen_vlm",
+            location="live screen",
+            text="\n".join(part for part in (text, description.reasoning) if part),
+        )
+        detail = description.to_dict()
+        detail["text"] = observed.as_data()
+        detail["untrusted"] = observed.to_dict()
+        return ActionOutcome(
+            tool="computer.describe_screen",
+            ok=True,
+            note="screen described",
+            detail=detail,
+            verified=True,
+            verified_note="local VLM returned a description of the captured frame",
+        )
 
     def lock_workstation(self) -> ActionOutcome:
         """EXECUTE: immediately lock this laptop. The backend is injected so a

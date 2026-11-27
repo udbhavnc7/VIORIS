@@ -309,6 +309,16 @@ TOOL_PARAMETERS: dict[str, dict] = {
         "properties": {},
         "additionalProperties": False,
     },
+    "computer.describe_screen": {
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": "optional question about the current screen, e.g. 'what does this error say?'",
+            },
+        },
+        "additionalProperties": False,
+    },
     "computer.open_app": {
         "type": "object",
         "properties": {

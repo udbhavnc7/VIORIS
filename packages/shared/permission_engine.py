@@ -301,6 +301,14 @@ _PHASE3_COMPUTER_TOOLS = [
         confirmation_required=False,
         description="Extract visible text from the screen via OCR/vision",
     ),
+    # Phase 7: a local VLM describes/reasons about the screen. It only observes
+    # — any follow-up action still goes through its own registered tool tier.
+    ToolRegistration(
+        tool_name="computer.describe_screen",
+        tier=RiskTier.OBSERVE,
+        confirmation_required=False,
+        description="Describe or reason about the live screen via a local vision-language model",
+    ),
     ToolRegistration(
         tool_name="computer.open_app",
         tier=RiskTier.OBSERVE,

@@ -58,6 +58,10 @@ class OpenAppRequest(BaseModel):
     name: str
 
 
+class DescribeScreenRequest(BaseModel):
+    question: str | None = None
+
+
 class StartSessionRequest(BaseModel):
     device_id: str
     timeout_minutes: int = Field(default=5, ge=1, le=60)
@@ -106,6 +110,15 @@ def screenshot() -> dict:
 @app.get("/screen-text")
 def screen_text() -> dict:
     return _outcome(get_agent().read_screen_text())
+
+
+@app.post("/screen-describe")
+def screen_describe(req: DescribeScreenRequest) -> dict:
+    """OBSERVE: describe/reason about a fresh frame with the local VLM.
+
+    Reporting only — this endpoint never clicks, types or changes anything.
+    """
+    return _outcome(get_agent().describe_screen(req.question))
 
 
 @app.post("/open-app")

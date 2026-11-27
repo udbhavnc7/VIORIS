@@ -5,6 +5,8 @@ action/surface that is not registered before anything runs.
 """
 
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -38,6 +40,19 @@ def client(tmp_path):
         screenshot_fn=(lambda p: (p.parent.mkdir(parents=True, exist_ok=True), p.write_bytes(b"\x89PNG" + b"\x00" * 16), p)[2]),
         ocr_fn=lambda _p: "hello vioris\n",
         open_app_fn=lambda _n: None,
+        vlm_describe_fn=lambda _image, question: SimpleNamespace(
+            description="A welcome dialog is open",
+            elements=[],
+            reasoning=question or "general description",
+            raw_response="{}",
+            model="llava:7b",
+            to_dict=lambda: {
+                "description": "A welcome dialog is open",
+                "elements": [],
+                "reasoning": question or "general description",
+                "model": "llava:7b",
+            },
+        ),
     )
     with TestClient(app) as c:
         yield c
@@ -77,8 +92,27 @@ def test_permission_engine_blocks_unregistered_computer_step(tmp_path):
 def test_registered_computer_tools_are_observe_tier(client):
     from packages.shared.permission_engine import PermissionEngine
 
-    for tool in ("computer.list_windows", "computer.open_app", "computer.capture_screenshot", "computer.read_screen_text"):
+    for tool in (
+        "computer.list_windows",
+        "computer.open_app",
+        "computer.capture_screenshot",
+        "computer.read_screen_text",
+        "computer.describe_screen",
+    ):
         assert PermissionEngine.classify(tool).confirmation_required is False
+        assert PermissionEngine.classify(tool).tier.value == "observe"
+
+
+def test_screen_describe_endpoint_reports_only(client):
+    r = client.post("/screen-describe", json={"question": "What is open?"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tool"] == "computer.describe_screen"
+    assert body["ok"] and body["verified"] is True
+    assert body["detail"]["description"] == "A welcome dialog is open"
+    assert body["detail"]["reasoning"] == "What is open?"
+    assert body["detail"]["untrusted"]["source"] == "screen_vlm"
+    assert "[UNTRUSTED DATA" in body["detail"]["text"]
 
 
 def test_screenshot_image_requires_active_session(client):

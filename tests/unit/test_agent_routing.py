@@ -99,6 +99,8 @@ def _run(tool, args):
         ("file.delete", {"path": "a.md"}, "POST", "/delete", {"path": "a.md"}),
         ("terminal.run", {"command": "git", "args": ["status"]}, "POST", "/terminal", {"command": "git", "args": ["status"]}),
         ("computer.read_screen_text", {}, "GET", "/screen-text", None),
+        ("computer.describe_screen", {"question": "What does this error say?"}, "POST", "/screen-describe", {"question": "What does this error say?"}),
+        ("computer.describe_screen", {}, "POST", "/screen-describe", {"question": None}),
         ("computer.list_windows", {}, "GET", "/windows", None),
         ("computer.open_app", {"name": "notepad"}, "POST", "/open-app", {"name": "notepad"}),
         ("computer.lock_workstation", {"device_id": "phone1"}, "POST", "/remote/lock", {"device_id": "phone1"}),

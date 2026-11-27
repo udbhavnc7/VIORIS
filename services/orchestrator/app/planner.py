@@ -403,6 +403,25 @@ class Planner:
                     )
                 ],
             )
+        # VLM screen reasoning is still Observe-tier: it only looks and reports.
+        if re.search(
+            r"\b(?:describe|explain|summari[sz]e)\s+(?:the\s+|this\s+|my\s+)?(?:screen|dialog|window|error)\b"
+            r"|\bwhat(?:\s+does|\s+is)?\s+(?:this|the)\s+(?:screen|dialog|error|window)\s+say\b"
+            r"|\b(?:use|ask)\s+(?:the\s+)?(?:vlm|vision|llava|moondream)\b",
+            lower,
+        ):
+            args = {"question": text} if "?" in text else {}
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "computer.describe_screen",
+                        args,
+                        agent="computer",
+                        reason="Describing the screen with the local VLM is Observe-tier; it never clicks or changes anything.",
+                    )
+                ],
+            )
         if re.search(r"\b(read screen|read the screen|what(?:'s| is) on (?:my |the )?screen)\b", lower):
             return Plan(
                 request=transcript,
