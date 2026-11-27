@@ -163,6 +163,13 @@ class MemoryCategory(str, Enum):
     SENSITIVE = "sensitive"
 
 
+class MemoryType(str, Enum):
+    """Episodic = what happened (timestamped events); semantic = what is known."""
+
+    EPISODIC = "episodic"
+    SEMANTIC = "semantic"
+
+
 class Memory(BaseModel):
     """A single memory record. Every record carries source, created_at, and
     confidence so answers can always cite where they came from."""
@@ -171,6 +178,9 @@ class Memory(BaseModel):
     category: MemoryCategory
     content: str
     source: str  # where this fact came from (e.g. 'user said on 2026-08-01', 'note:foo.md')
+    # Persisted collection. None only for records built outside the store;
+    # retrieval falls back to the category mapping in that case.
+    memory_type: MemoryType | None = None
     relationship: str = ""  # people memories: spouse, manager, sibling, etc.
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     user_opted_in: bool = False  # required True before any sensitive write succeeds

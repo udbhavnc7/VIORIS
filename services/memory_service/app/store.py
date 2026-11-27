@@ -25,7 +25,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from packages.shared.schemas import Memory, MemoryCategory
+from packages.shared.memory_split import classify_memory_type
+from packages.shared.schemas import Memory, MemoryCategory, MemoryType
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
     memory_id      TEXT PRIMARY KEY,
     category       TEXT NOT NULL,
+    memory_type    TEXT NOT NULL DEFAULT 'semantic',
     content        TEXT NOT NULL,
     source         TEXT NOT NULL,
     relationship   TEXT NOT NULL DEFAULT '',
@@ -41,17 +43,27 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL,
     embedding      BLOB,
-    CHECK (category IN ('preferences','people','projects','routines','sensitive'))
+    CHECK (category IN ('preferences','people','projects','routines','sensitive')),
+    CHECK (memory_type IN ('episodic','semantic'))
 );
+"""
 
+# Two retrieval collections share one ledger: partial indexes give each its own
+# access path without duplicating data (or breaking existing memory_ids).
+_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+CREATE INDEX IF NOT EXISTS idx_memories_episodic ON memories(created_at)
+    WHERE memory_type = 'episodic';
+CREATE INDEX IF NOT EXISTS idx_memories_semantic ON memories(category, confidence)
+    WHERE memory_type = 'semantic';
 """
 
 # Existing local databases predate the relationship field. Add it in place so
-# people memories can be tagged without losing stored history.
+# people memories can be tagged without losing stored history. memory_type is
+# appended last (after `updated_at`) in the SELECT projection.
 _MEMORY_COLUMNS = (
     "memory_id, category, content, source, relationship, confidence, "
-    "user_opted_in, created_at, updated_at"
+    "user_opted_in, created_at, updated_at, memory_type"
 )
 
 
@@ -82,6 +94,7 @@ def _row_to_memory(row: tuple) -> Memory:
         user_opted_in=bool(row[6]),
         created_at=datetime.fromisoformat(row[7]),
         updated_at=datetime.fromisoformat(row[8]),
+        memory_type=MemoryType(row[9]) if len(row) > 9 and row[9] else None,
     )
 
 
@@ -99,6 +112,16 @@ class MemoryStore:
             self._conn.execute(
                 "ALTER TABLE memories ADD COLUMN relationship TEXT NOT NULL DEFAULT ''"
             )
+        if "memory_type" not in columns:
+            self._conn.execute(
+                "ALTER TABLE memories ADD COLUMN memory_type TEXT NOT NULL DEFAULT 'semantic'"
+            )
+            # Backfill using the old category mapping so history keeps its old
+            # retrieval behaviour after the migration.
+            self._conn.execute(
+                "UPDATE memories SET memory_type = 'episodic' WHERE category = 'routines'"
+            )
+        self._conn.executescript(_INDEXES)
         self._conn.commit()
 
     def close(self) -> None:
@@ -115,10 +138,12 @@ class MemoryStore:
         source: str,
         confidence: float = 1.0,
         relationship: str = "",
+        memory_type: MemoryType | None = None,
     ) -> StoreResult:
         return self.store_and_user_opt_in(
             category, content, source, confidence,
             user_opted_in=False, relationship=relationship,
+            memory_type=memory_type,
         )
 
     def store_and_user_opt_in(
@@ -129,6 +154,7 @@ class MemoryStore:
         confidence: float = 1.0,
         user_opted_in: bool = False,
         relationship: str = "",
+        memory_type: MemoryType | None = None,
     ) -> StoreResult:
         if category == MemoryCategory.SENSITIVE and not user_opted_in:
             logger.warning("Sensitive write refused without explicit opt-in")
@@ -138,18 +164,20 @@ class MemoryStore:
             )
         memory_id = f"mem_{uuid.uuid4().hex[:8]}"
         now = _now()
+        collection = memory_type or classify_memory_type(category)
         with self._lock:
             try:
                 self._conn.execute(
                     """
-                    INSERT INTO memories (memory_id, category, content, source,
-                                          relationship, confidence, user_opted_in,
-                                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO memories (memory_id, category, memory_type, content,
+                                          source, relationship, confidence,
+                                          user_opted_in, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         memory_id,
                         category.value,
+                        collection.value,
                         content,
                         source,
                         relationship,
@@ -200,6 +228,11 @@ class MemoryStore:
             return existing
         mem = existing.memory
         target_cat = category_overwrite or mem.category
+        target_type = (
+            classify_memory_type(target_cat)
+            if category_overwrite
+            else (mem.memory_type or classify_memory_type(mem.category))
+        )
         kept_opt_in = mem.user_opted_in
         if target_cat == MemoryCategory.SENSITIVE and not kept_opt_in:
             return StoreResult(ok=False, error="cannot correct into sensitive without user_opted_in=True")
@@ -207,9 +240,16 @@ class MemoryStore:
         with self._lock:
             try:
                 self._conn.execute(
-                    "UPDATE memories SET content = ?, category = ?, "
+                    "UPDATE memories SET content = ?, category = ?, memory_type = ?, "
                     "user_opted_in = ?, updated_at = ? WHERE memory_id = ?",
-                    (content, target_cat.value, int(kept_opt_in), now, memory_id),
+                    (
+                        content,
+                        target_cat.value,
+                        target_type.value,
+                        int(kept_opt_in),
+                        now,
+                        memory_id,
+                    ),
                 )
                 self._conn.commit()
             except sqlite3.Error as exc:

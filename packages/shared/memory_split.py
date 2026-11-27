@@ -26,18 +26,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
-from typing import Iterator
 
-from packages.shared.schemas import Memory, MemoryCategory
+from packages.shared.schemas import Memory, MemoryCategory, MemoryType
 
 logger = logging.getLogger(__name__)
 
 
-class MemoryType(str, Enum):
-    EPISODIC = "episodic"
-    SEMANTIC = "semantic"
-
+# MemoryType is defined in schemas.py so the store can persist it without a
+# circular import. Re-exported here for existing callers.
 
 # Map existing categories to memory types
 CATEGORY_TO_TYPE: dict[MemoryCategory, MemoryType] = {
@@ -89,6 +85,11 @@ class MemorySplitter:
 
     store: object  # MemoryStore instance
 
+    @staticmethod
+    def _type_of(mem: Memory) -> MemoryType:
+        """Use the persisted collection, falling back for in-memory records."""
+        return mem.memory_type or classify_memory_type(mem.category)
+
     def query_episodic(self, query: EpisodicQuery) -> list[Memory]:
         """Retrieve episodic memories (things that happened).
 
@@ -100,7 +101,7 @@ class MemorySplitter:
         # Filter to episodic type
         results = [
             m for m in all_memories
-            if classify_memory_type(m.category) == MemoryType.EPISODIC
+            if self._type_of(m) == MemoryType.EPISODIC
         ]
 
         # Apply time range filter
@@ -134,7 +135,7 @@ class MemorySplitter:
         # Filter to semantic type
         results = [
             m for m in all_memories
-            if classify_memory_type(m.category) == MemoryType.SEMANTIC
+            if self._type_of(m) == MemoryType.SEMANTIC
         ]
 
         # Apply category filter
@@ -160,8 +161,8 @@ class MemorySplitter:
     def stats(self) -> dict:
         """Return counts of episodic vs semantic memories."""
         all_memories = self._get_all()
-        episodic = sum(1 for m in all_memories if classify_memory_type(m.category) == MemoryType.EPISODIC)
-        semantic = sum(1 for m in all_memories if classify_memory_type(m.category) == MemoryType.SEMANTIC)
+        episodic = sum(1 for m in all_memories if self._type_of(m) == MemoryType.EPISODIC)
+        semantic = sum(1 for m in all_memories if self._type_of(m) == MemoryType.SEMANTIC)
         return {
             "total": len(all_memories),
             "episodic": episodic,

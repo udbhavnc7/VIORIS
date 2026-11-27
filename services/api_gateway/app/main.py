@@ -163,6 +163,15 @@ class MemoryCorrectPayload(BaseModel):
     category: str | None = None
 
 
+class MemoryQueryPayload(BaseModel):
+    query: str = Field(min_length=1, max_length=1000)
+    keyword: str | None = None
+    category: str | None = None
+    after: str | None = None
+    before: str | None = None
+    limit: int = Field(default=20, ge=1, le=200)
+
+
 class KnowledgeIngestPayload(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     path: str = Field(min_length=1, max_length=1000)
@@ -1805,6 +1814,16 @@ async def v1_memory_create(
 ) -> dict:
     memory = await _memory_request("POST", "/memory", req.model_dump())
     return {"device": device.device_id, "memory": memory}
+
+
+@app.post("/v1/memory/query")
+async def v1_memory_query(
+    req: MemoryQueryPayload, device: Device = Depends(_require_device)
+) -> dict:
+    result = await _memory_request(
+        "POST", "/memory/query", req.model_dump(exclude_none=True)
+    )
+    return {"device": device.device_id, "query": result}
 
 
 @app.post("/v1/memory/correct/{memory_id}")

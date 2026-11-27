@@ -9,11 +9,19 @@ Run:
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from packages.shared.memory_split import (
+    EpisodicQuery,
+    MemorySplitter,
+    SemanticQuery,
+)
 from packages.shared.schemas import Memory, MemoryCategory
 
+from .query_planner import plan_memory_query
 from .store import MemoryStore
 
 app = FastAPI(title="Vioris Memory Service")
@@ -30,6 +38,16 @@ def get_store() -> MemoryStore:
     return _store
 
 
+_splitter: MemorySplitter | None = None
+
+
+def get_splitter() -> MemorySplitter:
+    global _splitter
+    if _splitter is None or _splitter.store is not get_store():
+        _splitter = MemorySplitter(store=get_store())
+    return _splitter
+
+
 class MemoryCreateRequest(BaseModel):
     category: MemoryCategory
     content: str = Field(min_length=1)
@@ -42,6 +60,15 @@ class MemoryCreateRequest(BaseModel):
 class MemoryCorrectRequest(BaseModel):
     content: str = Field(min_length=1)
     category: MemoryCategory | None = None  # re-categorize if provided
+
+
+class MemoryQueryRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=1000)
+    keyword: str | None = None
+    category: MemoryCategory | None = None
+    after: datetime | None = None
+    before: datetime | None = None
+    limit: int = Field(default=20, ge=1, le=200)
 
 
 @app.get("/memory")
@@ -61,6 +88,42 @@ def create_memory(req: MemoryCreateRequest) -> dict:
     if not result.ok:
         raise HTTPException(status_code=400, detail=result.error)
     return _mem_dict(result.memory)
+
+
+@app.post("/memory/query")
+def query_memory(req: MemoryQueryRequest) -> dict:
+    """Route a question to episodic or semantic memory and return cited hits.
+
+    The collection choice is made by the deterministic query planner, never by
+    the caller or by content fetched from memory.
+    """
+    plan = plan_memory_query(req.query)
+    splitter = get_splitter()
+    if plan.memory_type.value == "episodic":
+        results = splitter.query_episodic(
+            EpisodicQuery(
+                after=req.after,
+                before=req.before,
+                category=req.category,
+                keyword=req.keyword,
+                limit=req.limit,
+            )
+        )
+    else:
+        results = splitter.query_semantic(
+            SemanticQuery(
+                category=req.category,
+                keyword=req.keyword,
+                limit=req.limit,
+            )
+        )
+    return {
+        "memory_type": plan.memory_type.value,
+        "reason": plan.reason,
+        "signals": list(plan.signals),
+        "count": len(results),
+        "memories": [_mem_dict(m) for m in results],
+    }
 
 
 @app.post("/memory/correct/{memory_id}")
@@ -85,6 +148,7 @@ def _mem_dict(mem: Memory | None) -> dict:
     return {
         "memory_id": mem.memory_id,
         "category": mem.category.value,
+        "memory_type": mem.memory_type.value if mem.memory_type else None,
         "content": mem.content,
         "source": mem.source,
         "relationship": mem.relationship,

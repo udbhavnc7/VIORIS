@@ -1,6 +1,7 @@
 """Tests for the memory split module (Phase 7.2)."""
 
 import pytest
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -23,6 +24,71 @@ def store(tmp_path):
 @pytest.fixture
 def splitter(store):
     return MemorySplitter(store=store)
+
+
+class TestPersistedCollections:
+    def test_store_persists_collection_from_category(self, store):
+        event = store.add(MemoryCategory.ROUTINES, "Opened Slack at 9am", "task_history").memory
+        fact = store.add(MemoryCategory.PEOPLE, "Disha is my wife", "user said").memory
+        assert event.memory_type == MemoryType.EPISODIC
+        assert fact.memory_type == MemoryType.SEMANTIC
+
+    def test_explicit_collection_overrides_category_mapping(self, store):
+        logged = store.add(
+            MemoryCategory.PROJECTS, "Shipped the build at 4pm", "task_history",
+            memory_type=MemoryType.EPISODIC,
+        ).memory
+        assert logged.memory_type == MemoryType.EPISODIC
+        assert splitter_types(store) == [MemoryType.EPISODIC]
+
+    def test_collection_survives_reopen(self, tmp_path):
+        path = tmp_path / "persist.db"
+        first = MemoryStore(path)
+        first.add(MemoryCategory.ROUTINES, "Ran the report", "task_history")
+        first.close()
+        second = MemoryStore(path)
+        assert second.list(MemoryCategory.ROUTINES)[0].memory_type == MemoryType.EPISODIC
+        second.close()
+
+    def test_legacy_database_is_migrated_without_losing_history(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        with sqlite3.connect(str(path)) as conn:
+            conn.execute(
+                """
+                CREATE TABLE memories (
+                    memory_id TEXT PRIMARY KEY, category TEXT NOT NULL,
+                    content TEXT NOT NULL, source TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 1.0,
+                    user_opted_in INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    embedding BLOB
+                )
+                """
+            )
+            now = datetime.now(UTC).isoformat()
+            conn.execute(
+                "INSERT INTO memories VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("mem_old1", "routines", "Ran the report", "task_history", 1.0, 0, now, now, None),
+            )
+            conn.execute(
+                "INSERT INTO memories VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("mem_old2", "people", "Bob is my manager", "user said", 1.0, 0, now, now, None),
+            )
+
+        store = MemoryStore(path)
+        assert store.get("mem_old1").memory.memory_type == MemoryType.EPISODIC
+        assert store.get("mem_old2").memory.memory_type == MemoryType.SEMANTIC
+        assert MemorySplitter(store=store).stats() == {"total": 2, "episodic": 1, "semantic": 1}
+
+    def test_recategorization_moves_the_collection(self, store):
+        mem = store.add(MemoryCategory.ROUTINES, "Event", "task_history").memory
+        moved = store.correct(mem.memory_id, "Event", category_overwrite=MemoryCategory.PROJECTS).memory
+        assert moved.memory_type == MemoryType.SEMANTIC
+        assert MemorySplitter(store=store).stats()["episodic"] == 0
+
+
+def splitter_types(store):
+    return [m.memory_type for m in store.list()]
 
 
 class TestClassifyMemoryType:

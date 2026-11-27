@@ -79,6 +79,66 @@ def test_correct_memory(client):
     assert r.json()["created_at"] == created["created_at"]
 
 
+def test_query_routes_event_question_to_episodic_collection(client):
+    client.post(
+        "/memory",
+        json={"category": "routines", "content": "Asked about invoices at 9am", "source": "task_history"},
+    )
+    client.post(
+        "/memory",
+        json={"category": "people", "content": "Disha is my wife", "source": "user said"},
+    )
+
+    r = client.post("/memory/query", json={"query": "what did I ask yesterday?"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["memory_type"] == "episodic"
+    assert "time_reference" in body["signals"]
+    assert body["count"] == 1
+    assert body["memories"][0]["content"] == "Asked about invoices at 9am"
+    assert body["memories"][0]["memory_type"] == "episodic"
+
+
+def test_query_routes_fact_question_to_semantic_collection(client):
+    client.post(
+        "/memory",
+        json={"category": "routines", "content": "Opened settings at 9am", "source": "task_history"},
+    )
+    client.post(
+        "/memory",
+        json={"category": "preferences", "content": "Dark mode preferred", "source": "user said"},
+    )
+
+    r = client.post("/memory/query", json={"query": "what are my preferences?"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["memory_type"] == "semantic"
+    assert body["count"] == 1
+    assert body["memories"][0]["content"] == "Dark mode preferred"
+    assert body["memories"][0]["memory_type"] == "semantic"
+
+
+def test_query_applies_keyword_and_time_filters(client):
+    client.post("/memory", json={"category": "routines", "content": "Opened Chrome", "source": "task_history"})
+    client.post("/memory", json={"category": "routines", "content": "Checked email", "source": "task_history"})
+
+    body = client.post(
+        "/memory/query",
+        json={"query": "what happened earlier today", "keyword": "chrome", "limit": 5},
+    ).json()
+    assert body["count"] == 1
+    assert "Chrome" in body["memories"][0]["content"]
+
+    from datetime import UTC, datetime
+
+    future = datetime.now(UTC).isoformat()
+    body = client.post(
+        "/memory/query",
+        json={"query": "what happened earlier today", "after": future},
+    ).json()
+    assert body["count"] == 0
+
+
 def test_delete_memory(client):
     created = client.post("/memory", json={"category": "people", "content": "x", "source": "s"}).json()
     r = client.delete(f"/memory/{created['memory_id']}")
