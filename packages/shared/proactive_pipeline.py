@@ -105,6 +105,20 @@ APPROVAL_UTTERANCES = frozenset(
 )
 REJECTION_UTTERANCES = frozenset({"no don't", "cancel", "reject", "don't"})
 
+#: A bare "yes" is a standing Execute grant inside a verified call, but it is
+#: deliberately NOT enough for a Critical action. Critical needs this distinct
+#: phrase plus a fresh voiceprint sample, so a long call never quietly becomes
+#: standing authorization for money, deletion, credentials or publishing.
+CRITICAL_CONFIRM_UTTERANCES = frozenset(
+    {
+        "confirm critical",
+        "critical confirmed",
+        "authorize critical",
+        "yes confirm critical",
+        "yes, confirm critical",
+    }
+)
+
 
 class CallRole(Enum):
     LAPTOP = "laptop"  # the server side

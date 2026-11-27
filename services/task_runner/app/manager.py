@@ -302,8 +302,13 @@ class TaskManager:
     def pending_approvals(self, task_id: str | None = None) -> list[dict]:
         return [a.__dict__ for a in self.approvals.list_pending(task_id)]
 
-    def approve(self, task_id: str, approval_id: str) -> Task:
-        """Explicit approve for ONE step, tied to its idempotency_key. Resume."""
+    def approve(self, task_id: str, approval_id: str, *, second_factor: str | None = None) -> Task:
+        """Explicit approve for ONE step, tied to its idempotency_key. Resume.
+
+        ``second_factor`` records how the Critical gate was passed (pin or
+        voiceprint). It is audit metadata only — the caller must already have
+        verified the proof at the API boundary.
+        """
         task = self.get(task_id)
         approval = self.approvals.get(approval_id)
         if approval is None:
@@ -338,7 +343,10 @@ class TaskManager:
                 "tool": step.tool,
             }
         )
-        self.append_audit("system", "approved", {"approval": approval_id, "step": step.step_id}, task.task_id)
+        detail = {"approval": approval_id, "step": step.step_id}
+        if second_factor:
+            detail["second_factor"] = second_factor
+        self.append_audit("system", "approved", detail, task.task_id)
         return task
 
     def reject(self, task_id: str, approval_id: str) -> Task:
@@ -381,6 +389,7 @@ class TaskManager:
         undo_fn=None,
         execute_after_seconds: float = 30.0,
         undo_window_seconds: float = 300.0,
+        second_factor: str | None = None,
     ) -> StagedAction:
         """Stage an already-approved Critical step with a cancel/undo window.
 
@@ -421,18 +430,16 @@ class TaskManager:
             undo_window_seconds=undo_window_seconds,
             stage_id=stage_id,
         )
-        self.append_audit(
-            "system",
-            "staged",
-            {
-                "stage_id": action.stage_id,
-                "tool": tool,
-                "step": step_id,
-                "execute_after_seconds": execute_after_seconds,
-                "undo_window_seconds": undo_window_seconds,
-            },
-            task_id,
-        )
+        staged_detail = {
+            "stage_id": action.stage_id,
+            "tool": tool,
+            "step": step_id,
+            "execute_after_seconds": execute_after_seconds,
+            "undo_window_seconds": undo_window_seconds,
+        }
+        if second_factor:
+            staged_detail["second_factor"] = second_factor
+        self.append_audit("system", "staged", staged_detail, task_id)
         self.events.publish(
             {
                 "type": "staged",

@@ -38,7 +38,12 @@ from pydantic import BaseModel, Field
 from packages.shared.graceful_degradation import DegradationMode
 from packages.shared.kill_phrase import detect_kill_phrase
 from packages.shared.permission_engine import PermissionEngine, register_all_tools
-from packages.shared.second_factor import load_or_create_key, mint, pin_matches
+from packages.shared.second_factor import (
+    VOICEPRINT_FACTOR,
+    load_or_create_key,
+    mint,
+    pin_matches,
+)
 from packages.shared.tts import find_piper_voice
 
 from .pairing import (
@@ -201,6 +206,50 @@ def _device_dict(device) -> DeviceResponse:
 
 _bg_task: asyncio.Task | None = None
 _event_bridge_task: asyncio.Task | None = None
+_voiceprint = None  # VoiceprintManager, installed only when explicitly enabled
+_voiceprint_encoder_name = "none"
+
+
+def _configure_voiceprint() -> None:
+    """Install the local voiceprint manager when voiceprint is opted in.
+
+    Fails closed: with no ``VIORIS_VOICEPRINT_ENABLED=1`` no manager is
+    installed, so Critical actions keep requiring the PIN second factor and no
+    voiceprint proof can be minted.
+    """
+    global _voiceprint, _voiceprint_encoder_name
+    if os.getenv("VIORIS_VOICEPRINT_ENABLED", "").lower() not in ("1", "true", "yes"):
+        return
+    from packages.shared.voiceprint import FakeEncoder, VoiceprintManager
+
+    encoder_name = os.getenv("VIORIS_VOICEPRINT_ENCODER", "resemblyzer").strip().lower()
+    if encoder_name == "fake":
+        logger.warning(
+            "Voiceprint is using the FAKE dev encoder (energy-based, not "
+            "speaker-aware). It is only for local verification, never production."
+        )
+        encoder = FakeEncoder()
+    else:
+        encoder_name = "resemblyzer"
+        encoder = None  # VoiceprintManager lazily loads Resemblyzer
+    store = os.getenv("VIORIS_VOICEPRINT_FILE") or str(
+        Path.home() / ".vioris" / "voiceprint.npz"
+    )
+    vp = VoiceprintManager(encoder=encoder, store_path=Path(store))
+    threshold = os.getenv("VIORIS_VOICEPRINT_THRESHOLD")
+    if threshold:
+        try:
+            vp.threshold = float(threshold)
+        except ValueError:
+            logger.warning("Ignoring invalid VIORIS_VOICEPRINT_THRESHOLD=%s", threshold)
+    _voiceprint = vp
+    _voiceprint_encoder_name = encoder_name
+    PermissionEngine.set_voiceprint(vp)
+    logger.info(
+        "Voiceprint second factor enabled (encoder=%s, enrolled=%s)",
+        encoder_name,
+        vp.is_enrolled(),
+    )
 
 
 def _task_runner_ws_url() -> str:
@@ -290,6 +339,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     if not PermissionEngine._frozen:
         register_all_tools()
         PermissionEngine.freeze()
+    _configure_voiceprint()
 
     # Start background digest checker & task-runner event bridge
     global _bg_task, _event_bridge_task
@@ -533,7 +583,12 @@ def _action_to_steps(action: dict) -> list[dict] | None:
     return None
 
 
-async def _local_task_request(method: str, path: str, body: dict | None = None) -> dict:
+async def _local_task_request(
+    method: str,
+    path: str,
+    body: dict | None = None,
+    headers: dict | None = None,
+) -> dict:
     """Loopback task-runner call for in-process call-session actions.
 
     Unlike ``_proxy`` this is not device-scoped: the caller is the call
@@ -541,8 +596,11 @@ async def _local_task_request(method: str, path: str, body: dict | None = None) 
     owns risk classification, approval and audit for every step.
     """
     url = f"{TASK_RUNNER_URL}{path}"
+    kwargs: dict = {"json": body, "timeout": 10.0}
+    if headers:
+        kwargs["headers"] = headers
     try:
-        resp = await _client().request(method, url, json=body, timeout=10.0)
+        resp = await _client().request(method, url, **kwargs)
     except httpx.RequestError as exc:
         raise HTTPException(status_code=503, detail=f"task-runner unreachable: {exc}") from exc
     try:
@@ -638,15 +696,74 @@ async def _execute_call_action(call_id: str, action: dict) -> dict:
     }
 
 
+def _is_critical_confirm(text: str) -> bool:
+    """A bare 'yes' is never enough for a Critical action in a call."""
+    from packages.shared.proactive_pipeline import CRITICAL_CONFIRM_UTTERANCES
+
+    return (text or "").strip().lower() in CRITICAL_CONFIRM_UTTERANCES
+
+
+def _decode_pcm16(data: str):
+    """Decode base64 PCM16 mono audio into float32 samples for the voiceprint."""
+    from .call_audio import pcm16_bytes_to_float32
+
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid audio data: {exc}") from exc
+    return pcm16_bytes_to_float32(raw)
+
+
+def _mint_voiceprint_proof(approval_id: str, audio, sample_rate: int = 16000) -> tuple[str | None, str | None]:
+    """Mint a Critical proof only after a live, verified voice sample matches.
+
+    Three independent gates must all pass: voiceprint is enrolled, the current
+    call was voiceprint-verified at pickup and is still live, and THIS fresh
+    audio matches the enrolled speaker. The proof is approval-scoped and
+    short-lived, and the task-runner verifies it again before staging.
+    """
+    trust = PermissionEngine.get_call_trust()
+    session = getattr(trust, "session", None)
+    if (
+        trust is None
+        or session is None
+        or not getattr(session, "voiceprint_verified", False)
+        or not trust.can_execute()
+    ):
+        return None, (
+            "A voiceprint approval needs an active call whose voiceprint was "
+            "verified at pickup; nothing was approved."
+        )
+    ok, note = PermissionEngine.verify_critical_second_factor(
+        audio=audio, sample_rate=sample_rate
+    )
+    if not ok:
+        return None, note
+    return mint(approval_id, load_or_create_key(), factor=VOICEPRINT_FACTOR), None
+
+
+async def _approval_record(approval_id: str) -> dict | None:
+    """Look up one approval by id through the task-runner (no device scope)."""
+    try:
+        approvals = await _local_task_request("GET", "/approvals")
+    except HTTPException:
+        return None
+    return next(
+        (a for a in approvals if isinstance(a, dict) and a.get("approval_id") == approval_id),
+        None,
+    )
+
+
 async def _resolve_pending_call_action(
-    call_id: str, pipeline, *, approve: bool
+    call_id: str, pipeline, *, approve: bool, second_factor: str | None = None
 ) -> dict | None:
     """Approve/reject the task queued by a confirmed call action, if any.
 
     Returns None when this call has no queued task (the normal pipeline
     pending-action flow then handles the utterance). Critical tools still need
-    their second factor: the task-runner returns 403/409 and that is reported
-    back instead of being bypassed.
+    their second factor: ``second_factor`` must be a freshly minted,
+    approval-scoped proof, and the task-runner re-verifies it. Without one the
+    task-runner returns 403/409 and that is reported back — never bypassed.
     """
     session = pipeline.get_session(call_id) if pipeline is not None else None
     pending = (session.metadata.get("pending_call_approval") if session else None) or {}
@@ -654,8 +771,11 @@ async def _resolve_pending_call_action(
     if not approval_id:
         return None
     action = "approve" if approve else "reject"
+    headers = {"X-Vioris-Second-Factor": second_factor} if second_factor else None
     try:
-        outcome = await _local_task_request("POST", f"/approvals/{approval_id}/{action}")
+        outcome = await _local_task_request(
+            "POST", f"/approvals/{approval_id}/{action}", headers=headers
+        )
         if approve:
             status = outcome.get("status") or "unknown"
             task_id = outcome.get("task_id") or pending.get("task_id")
@@ -675,12 +795,23 @@ def get_pipeline():
     global _pipeline
     if _pipeline is None:
         from packages.shared.call_triggers import CallTriggerStore
+        from packages.shared.dialogue import DialogueOrchestrator
         from packages.shared.proactive_pipeline import ProactiveCallPipeline
 
+        dialogue = None
+        if _voiceprint is not None:
+            # A verified call needs a real speaker check at pickup, not just a
+            # phone that was paired once. The checker stays local to the laptop.
+            dialogue = DialogueOrchestrator(
+                voiceprint_checker=lambda audio, sample_rate=16000: _voiceprint.verify(
+                    audio, sample_rate
+                )
+            )
         _pipeline = ProactiveCallPipeline(
             hub=get_hub(),
             trigger_store=CallTriggerStore(),
             on_action=_execute_call_action,
+            dialogue=dialogue,
         )
         _setup_hub_handlers(get_hub(), _pipeline)
     return _pipeline
@@ -743,10 +874,67 @@ def _setup_hub_handlers(hub: WebSocketHub, pipeline) -> None:
         buffer = audio_buffers.pop(call_id, None)
         if not call_id or buffer is None or not buffer.has_speech():
             return
-        text = await asyncio.to_thread(_get_stt().transcribe, buffer.drain())
-        text = (text or "").strip()
+        audio = buffer.drain()  # kept so a Critical confirm can be voiceprint-checked
+        text = (await asyncio.to_thread(_get_stt().transcribe, audio) or "").strip()
         if not text:
             return
+
+        # Pickup verification: when voiceprint is enabled, the first spoken
+        # sample of a call must match the enrolled speaker before any spoken
+        # instruction is trusted. Failures are reported honestly and execute
+        # nothing.
+        dialogue = getattr(pipeline, "dialogue", None)
+        trust = getattr(dialogue, "trust", None)
+        if (
+            _voiceprint is not None
+            and trust is not None
+            and not getattr(getattr(trust, "session", None), "voiceprint_verified", False)
+        ):
+            ok, note = trust.verify_voiceprint(audio)
+            spoken = (
+                "Voice verified. What would you like me to do?"
+                if ok
+                else f"I couldn't verify your voice ({note}). Nothing was executed."
+            )
+            await hub.send_to_phones(
+                {"type": "voice_response", "payload": {"call_id": call_id, "text": spoken}}
+            )
+            return
+
+        # A distinct Critical confirm phrase resolves a pending Critical
+        # approval with a FRESH voiceprint proof. A bare "yes" never does —
+        # it cannot turn a long call into standing authorization for money,
+        # deletion, credentials or publishing.
+        session = pipeline.get_session(call_id) if pipeline else None
+        pending = (session.metadata.get("pending_call_approval") if session else None) or {}
+        approval_id = pending.get("approval_id")
+        if approval_id and _is_critical_confirm(text):
+            record = await _approval_record(str(approval_id))
+            is_critical = False
+            if record:
+                try:
+                    from packages.shared.schemas import RiskTier
+
+                    is_critical = (
+                        PermissionEngine.classify(record.get("tool")).tier == RiskTier.CRITICAL
+                    )
+                except Exception:  # noqa: BLE001 — unknown tool is never approvable
+                    is_critical = False
+            if is_critical:
+                proof, error = _mint_voiceprint_proof(str(approval_id), audio)
+                if proof:
+                    resolved = await _resolve_pending_call_action(
+                        call_id, pipeline, approve=True, second_factor=proof
+                    )
+                else:
+                    resolved = {
+                        "text": f"I can't approve that Critical action: {error}",
+                        "result": {"error": error},
+                    }
+                if resolved is not None:
+                    await _send_approval_result(call_id, resolved)
+                    return
+
         result = await pipeline.handle_phone_message(call_id, text)
         await _speak_and_push(call_id, result)
 
@@ -1338,6 +1526,68 @@ def _parse_ts(value: str | None) -> float:
         return 0.0
 
 
+class VoiceprintEnrollPayload(BaseModel):
+    """Base64 PCM16 mono segments spoken for the enrollment passphrase."""
+
+    segments: list[str] = Field(min_length=1)
+    sample_rate: int = 16000
+
+
+@app.get("/v1/voiceprint/status")
+async def v1_voiceprint_status(device: Device = Depends(_require_device)) -> dict:
+    """Report whether the local voiceprint second factor is usable.
+
+    Never exposes the embedding or the key — only configuration state.
+    """
+    trust = PermissionEngine.get_call_trust()
+    session = getattr(trust, "session", None)
+    verified_call = bool(
+        session is not None
+        and getattr(session, "voiceprint_verified", False)
+        and trust is not None
+        and trust.can_execute()
+    )
+    return {
+        "device": device.device_id,
+        "enabled": _voiceprint is not None,
+        "enrolled": bool(_voiceprint is not None and _voiceprint.is_enrolled()),
+        "encoder": _voiceprint_encoder_name,
+        "verified_call_session": verified_call,
+    }
+
+
+@app.post("/v1/voiceprint/enroll")
+async def v1_voiceprint_enroll(
+    req: VoiceprintEnrollPayload, device: Device = Depends(_require_device)
+) -> dict:
+    """Enroll (or re-enroll) the local voiceprint from spoken PCM16 segments.
+
+    Available only when voiceprint is explicitly enabled. Re-enrollment
+    replaces the reference embedding, so it is recorded in the gateway log.
+    """
+    if _voiceprint is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Voiceprint is disabled. Set VIORIS_VOICEPRINT_ENABLED=1 before starting Vioris.",
+        )
+    segments = [_decode_pcm16(s) for s in req.segments]
+    try:
+        _voiceprint.enroll(segments, sample_rate=req.sample_rate)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.info(
+        "Voiceprint enrolled by device %s (%d segments, encoder=%s)",
+        device.device_id,
+        len(segments),
+        _voiceprint_encoder_name,
+    )
+    return {
+        "device": device.device_id,
+        "enrolled": True,
+        "encoder": _voiceprint_encoder_name,
+    }
+
+
 @app.post("/v1/approvals/{approval_id}/approve")
 async def v1_approve(
     approval_id: str,
@@ -1345,7 +1595,8 @@ async def v1_approve(
     device: Device = Depends(_require_device),
 ) -> dict:
     """Approve exactly one action. Critical actions additionally require the
-    locally configured PIN and the cooldown; the proof is bound to this
+    cooldown plus ONE second factor: the local PIN, or a fresh voiceprint
+    sample inside a voiceprint-verified call. The proof is bound to this
     approval id and verified again by the task-runner."""
     approvals = await _proxy("GET", "/approvals", device)
     target = next((a for a in approvals if a.get("approval_id") == approval_id), None)
@@ -1368,11 +1619,25 @@ async def v1_approve(
                 status_code=409,
                 detail=f"Critical cooldown: wait {retry_after}s before approving.",
             )
-        pin = (payload or {}).get("pin")
-        ok, note = pin_matches(pin)
-        if not ok:
-            raise HTTPException(status_code=403, detail=note)
-        headers = {"X-Vioris-Second-Factor": mint(approval_id, load_or_create_key())}
+        body = payload or {}
+        if body.get("voiceprint_audio"):
+            if not _is_critical_confirm(str(body.get("phrase") or "")):
+                raise HTTPException(
+                    status_code=403,
+                    detail='A Critical action needs the distinct phrase "confirm critical".',
+                )
+            audio = _decode_pcm16(str(body["voiceprint_audio"]))
+            proof, note = _mint_voiceprint_proof(
+                approval_id, audio, int(body.get("sample_rate") or 16000)
+            )
+            if not proof:
+                raise HTTPException(status_code=403, detail=note)
+            headers = {"X-Vioris-Second-Factor": proof}
+        else:
+            ok, note = pin_matches(body.get("pin"))
+            if not ok:
+                raise HTTPException(status_code=403, detail=note)
+            headers = {"X-Vioris-Second-Factor": mint(approval_id, load_or_create_key())}
 
     approved = await _proxy(
         "POST", f"/approvals/{approval_id}/approve", device, headers=headers
@@ -1386,6 +1651,7 @@ async def v1_approve(
             "result": approved,
             "staged": True,
             "stage_id": approved.get("stage_id"),
+            "second_factor": approved.get("second_factor"),
             "execute_after_seconds": approved.get("execute_after_seconds"),
             "undo_window_seconds": approved.get("undo_window_seconds"),
         }

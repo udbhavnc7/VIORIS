@@ -1,12 +1,15 @@
 """Second-factor proof for Critical-tier approvals.
 
 Critical actions need more than a click. The gateway verifies a locally
-configured PIN, then mints a short-lived HMAC proof bound to one approval id.
-The task-runner verifies that proof before arming a Critical step, so calling
-the task-runner API directly cannot bypass the second factor.
+configured PIN, or a fresh voice sample against the enrolled voiceprint inside
+a voiceprint-verified call, then mints a short-lived HMAC proof bound to one
+approval id. The task-runner verifies that proof before arming a Critical step,
+so calling the task-runner API directly cannot bypass the second factor.
 
-The HMAC key is a local secret file with owner-only permissions. It is never
-sent to the browser, logged, or included in audit detail.
+The proof records which factor was used (``pin`` or ``voiceprint``) and the
+task-runner writes that into the audit chain. Both factors are local-only; the
+HMAC key is a local secret file with owner-only permissions and is never sent
+to the browser, logged, or included in audit detail.
 """
 
 from __future__ import annotations
@@ -21,6 +24,10 @@ from pathlib import Path
 
 DEFAULT_KEY_PATH = Path("vioris_data/second_factor.key")
 PROOF_TTL_SECONDS = 120
+
+PIN_FACTOR = "pin"
+VOICEPRINT_FACTOR = "voiceprint"
+_ALLOWED_FACTORS = (PIN_FACTOR, VOICEPRINT_FACTOR)
 
 
 def _key_path(path: str | Path | None = None) -> Path:
@@ -50,29 +57,101 @@ def _signature(payload: bytes, key: bytes) -> str:
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
-def mint(approval_id: str, key: bytes, now: float | None = None) -> str:
-    """Mint an approval-scoped, short-lived proof: <exp>.<sig>."""
+def _payload(approval_id: str, exp: int, factor: str) -> bytes:
+    """Sign over the factor too, so a PIN proof can never be relabelled."""
+    if factor == PIN_FACTOR:
+        return f"{approval_id}:{exp}".encode()
+    return f"{approval_id}:{exp}:{factor}".encode()
+
+
+def mint(
+    approval_id: str,
+    key: bytes,
+    now: float | None = None,
+    factor: str = PIN_FACTOR,
+) -> str:
+    """Mint an approval-scoped, short-lived proof: <exp>.<sig>.
+
+    Voiceprint proofs carry their factor in the token (``<exp>.voiceprint.<sig>``)
+    so the verifier — and the audit chain — can tell how consent was obtained.
+    """
+    if factor not in _ALLOWED_FACTORS:
+        raise ValueError(f"unknown second-factor type: {factor}")
     exp = int((now if now is not None else time.time()) + PROOF_TTL_SECONDS)
-    payload = f"{approval_id}:{exp}".encode()
-    return f"{exp}.{_signature(payload, key)}"
+    sig = _signature(_payload(approval_id, exp, factor), key)
+    if factor == PIN_FACTOR:
+        return f"{exp}.{sig}"
+    return f"{exp}.{factor}.{sig}"
 
 
-def verify(proof: str | None, approval_id: str, key: bytes, now: float | None = None) -> tuple[bool, str]:
-    """Verify a proof for exactly this approval. Fails closed on any doubt."""
+def _parse(proof: str | None) -> tuple[int, str, str] | None:
     if not proof:
-        return False, "second factor proof is missing"
+        return None
     try:
-        exp_raw, sig = proof.split(".", 1)
-        exp = int(exp_raw)
+        parts = proof.split(".")
+        if len(parts) == 2:
+            exp_raw, sig = parts
+            factor = PIN_FACTOR
+        elif len(parts) == 3 and parts[1] == VOICEPRINT_FACTOR:
+            exp_raw, _, sig = parts
+            factor = VOICEPRINT_FACTOR
+        else:
+            return None
+        return int(exp_raw), factor, sig
     except (ValueError, AttributeError):
-        return False, "second factor proof is malformed"
+        return None
+
+
+def verify_with_factor(
+    proof: str | None,
+    approval_id: str,
+    key: bytes,
+    now: float | None = None,
+    allowed_factors: tuple[str, ...] = _ALLOWED_FACTORS,
+) -> tuple[bool, str, str]:
+    """Verify a proof for exactly this approval. Fails closed on any doubt.
+
+    Returns ``(ok, note, factor)``. ``factor`` is the factor claimed by the
+    token even when verification fails, so refused attempts stay auditable.
+    """
+    parsed = _parse(proof)
+    if parsed is None:
+        factor = VOICEPRINT_FACTOR if proof and ".voiceprint." in proof else PIN_FACTOR
+        if not proof:
+            return False, "second factor proof is missing", factor
+        return False, "second factor proof is malformed", factor
+    exp, factor, sig = parsed
+    if factor not in allowed_factors:
+        return False, f"second factor '{factor}' is not allowed here", factor
     current = now if now is not None else time.time()
     if exp < current:
-        return False, "second factor proof expired"
-    payload = f"{approval_id}:{exp}".encode()
-    if not hmac.compare_digest(sig, _signature(payload, key)):
-        return False, "second factor proof is invalid"
-    return True, "second factor verified"
+        return False, "second factor proof expired", factor
+    if not hmac.compare_digest(sig, _signature(_payload(approval_id, exp, factor), key)):
+        return False, "second factor proof is invalid", factor
+    return True, "second factor verified", factor
+
+
+def proof_factor(proof: str | None) -> str:
+    """Report the factor claimed by a token (even a malformed one), for audit.
+
+    This does not verify anything — call it only after :func:`verify` succeeds.
+    """
+    parsed = _parse(proof)
+    if parsed is not None:
+        return parsed[1]
+    return VOICEPRINT_FACTOR if proof and ".voiceprint." in proof else PIN_FACTOR
+
+
+def verify(
+    proof: str | None,
+    approval_id: str,
+    key: bytes,
+    now: float | None = None,
+    allowed_factors: tuple[str, ...] = _ALLOWED_FACTORS,
+) -> tuple[bool, str]:
+    """Backward-compatible wrapper around :func:`verify_with_factor`."""
+    ok, note, _ = verify_with_factor(proof, approval_id, key, now, allowed_factors)
+    return ok, note
 
 
 def pin_matches(candidate: str | None) -> tuple[bool, str]:

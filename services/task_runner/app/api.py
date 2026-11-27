@@ -26,7 +26,7 @@ from packages.shared.permission_engine import (
     register_all_tools,
 )
 from packages.shared.schemas import RiskTier, TaskStatus, TaskStep
-from packages.shared.second_factor import load_or_create_key
+from packages.shared.second_factor import load_or_create_key, proof_factor
 from packages.shared.second_factor import verify as verify_second_factor
 
 from .background import dispatch_step
@@ -386,9 +386,12 @@ def approve_approval(
         ok, note = verify_second_factor(x_vioris_second_factor, approval_id, key)
         if not ok:
             raise HTTPException(status_code=403, detail=note)
+        factor = proof_factor(x_vioris_second_factor)
+    else:
+        factor = None
 
     try:
-        task = mgr.approve(approval.task_id, approval_id)
+        task = mgr.approve(approval.task_id, approval_id, second_factor=factor)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -407,6 +410,7 @@ def approve_approval(
             undo_fn=_undo_fn_for(mgr, task.task_id, approval.step_id, approval.tool),
             execute_after_seconds=_critical_stage_seconds(),
             undo_window_seconds=_critical_undo_seconds(),
+            second_factor=factor,
         )
         return {
             "approved": approval_id,
@@ -415,6 +419,7 @@ def approve_approval(
             "queued": False,
             "staged": True,
             "stage_id": stage.stage_id,
+            "second_factor": factor,
             "execute_after_seconds": stage.execute_after_seconds,
             "undo_window_seconds": stage.undo_window_seconds,
             "diff_card": approval.diff_card,
