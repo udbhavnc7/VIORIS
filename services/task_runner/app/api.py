@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from packages.shared.kill_phrase import detect_kill_phrase
 from packages.shared.permission_engine import (
@@ -57,6 +57,19 @@ def get_manager() -> TaskManager:
     return _manager
 
 
+_routine_settings = None
+
+
+def get_routine_settings():
+    """Opt-in ledger for routine mining; fails closed when unreadable."""
+    global _routine_settings
+    if _routine_settings is None:
+        from packages.shared.routine_settings import RoutineSettingsStore
+
+        _routine_settings = RoutineSettingsStore()
+    return _routine_settings
+
+
 class CreateTaskRequest(BaseModel):
     request: str
     steps: list[dict] | None = None
@@ -76,6 +89,18 @@ class ExplainQuery(BaseModel):
 
 class KillPhraseRequest(BaseModel):
     transcript: str = ""
+
+
+class RoutineOptInRequest(BaseModel):
+    enabled: bool
+
+
+class RoutineCreateRequest(BaseModel):
+    pattern_id: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+    tool: str | None = None
+    sequence: list[str] | None = None
+    time_pattern: str | None = None
 
 
 @app.post("/tasks")
@@ -181,9 +206,14 @@ def _execute(step, task=None):
     (smart_home.control, …) can prove their approval belongs to this task's
     step before anything external fires.
     """
+    from packages.shared.routine_miner import TaskHistoryAdapter
+
     from .executor import make_executor
 
-    return make_executor()(step, task=task)
+    return make_executor(
+        routine_store=get_routine_settings(),
+        task_store=TaskHistoryAdapter(get_manager()),
+    )(step, task=task)
 
 
 @app.post("/tasks/{task_id}/run")
@@ -474,6 +504,86 @@ def undo_stage(stage_id: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+# ── opt-in routine suggestions (Phase 7.4) ──────────────────────────────────
+# Mining is Observe/Prepare by construction: it reads local task history and
+# only proposes. Creating an automation is a SEPARATE Execute-tier step that
+# goes through the same approval ledger as every other externally visible
+# action. Nothing here schedules or fires a tool.
+
+
+@app.post("/routines/opt-in")
+def routine_opt_in(req: RoutineOptInRequest) -> dict:
+    """Explicitly turn routine mining on/off. Off by default, fails closed."""
+    result = get_routine_settings().set_opted_in(req.enabled)
+    get_manager().append_audit(
+        "user",
+        "routine_opt_in",
+        {"enabled": req.enabled},
+    )
+    return {"ok": True, **result}
+
+
+@app.get("/routines/suggestions")
+def routine_suggestions() -> dict:
+    """Mine task history and return Prepare-tier proposals (shown, never sent)."""
+    from packages.shared.routine_miner import RoutineMiner, TaskHistoryAdapter
+
+    settings = get_routine_settings()
+    if not settings.opted_in():
+        return {
+            "opted_in": False,
+            "suggestions": [],
+            "count": 0,
+            "note": "routine mining is off — opt in first",
+        }
+    miner = RoutineMiner(task_store=TaskHistoryAdapter(get_manager()))
+    patterns = miner.find_routines()
+    get_manager().append_audit(
+        "system",
+        "routine_suggestions",
+        {"count": len(patterns), "tier": "prepare"},
+    )
+    return {
+        "opted_in": True,
+        "suggestions": [p.to_dict() for p in patterns],
+        "count": len(patterns),
+        "note": "proposals only — no automation was created or scheduled",
+    }
+
+
+@app.post("/routines/create")
+def routine_create(req: RoutineCreateRequest) -> dict:
+    """Turn one proposal into an Execute-tier task that pauses for approval.
+
+    The routine itself is only *recorded* (locally) after the user approves the
+    generated diff card. No scheduler or external side effect is wired here.
+    """
+    if not get_routine_settings().opted_in():
+        raise HTTPException(status_code=403, detail="routine automation requires opt-in")
+    args = req.model_dump(exclude_none=True)
+    created = create_task(
+        CreateTaskRequest(
+            request=f"automate routine {req.pattern_id}",
+            tool="system.create_routine",
+            step_count=1,
+            steps=[{"tool": "system.create_routine", "agent": "system", "args": args}],
+        )
+    )
+    task_id = created.get("task_id")
+    if not task_id:  # kill phrase or planner refusal — propagate honestly
+        return created
+    dispatched = dispatch_step(task_id)
+    task = dispatched["task"]
+    approvals = get_manager().pending_approvals(task_id)
+    return {
+        "task_id": task_id,
+        "status": task.status.value,
+        "approval_id": approvals[0]["approval_id"] if approvals else None,
+        "diff_card": approvals[0]["diff_card"] if approvals else None,
+        "queued": dispatched["queued"],
+    }
 
 
 @app.websocket("/ws/events")

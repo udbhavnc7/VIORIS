@@ -144,6 +144,43 @@ class Planner:
                 reasoning=reason,
             )
 
+        # ── opt-in routine suggestions (Prepare) / acceptance (Execute) ──
+        accept_routine = re.search(
+            r"\bautomate\s+(?:this\s+|that\s+|the\s+)?routine\s+([a-z0-9_]+)\b",
+            text,
+            re.I,
+        )
+        if accept_routine:
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "system.create_routine",
+                        {"pattern_id": accept_routine.group(1).lower()},
+                        reason=(
+                            "Automating a routine is an externally visible change, so it "
+                            "uses the Execute-tier tool and pauses for an approval card."
+                        ),
+                    )
+                ],
+            )
+        if re.search(
+            r"\b(?:suggest|show|list|find|any|what)\s+(?:me\s+)?(?:my\s+)?routines?\b",
+            lower,
+        ):
+            return Plan(
+                request=transcript,
+                steps=[
+                    make(
+                        "system.suggest_routine",
+                        reason=(
+                            "Routine mining only observes local task history and proposes — "
+                            "it never creates or schedules an automation."
+                        ),
+                    )
+                ],
+            )
+
         # ── briefing: three observe reads, nothing sent ───────────────────
         if re.search(r"\b(brief|briefing|digest|catch me up|on my plate|daily summary)\b", lower):
             return Plan(

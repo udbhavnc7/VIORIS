@@ -163,13 +163,16 @@ def make_executor(
     connector_urls: dict[str, str] | None = None,
     browser_url: str | None = None,
     documents_url: str | None = None,
+    routine_store=None,
+    task_store=None,
 ):
     """Return an `execute(step, task)` closure wired to the local services.
 
     Ports resolve from the env at CALL time, so tests that boot the services on
     free ports are order-independent (an early import never locks in a port).
     `connector_urls` overrides specific services (keyed by service name) for
-    tests.
+    tests. `routine_store` / `task_store` are injected for routine mining; when
+    omitted the handlers fail closed (no opt-in, no suggestions).
     """
     computer_url = computer_url or os.getenv("VIORUS_COMPUTER_URL", COMPUTER_URL)
     browser_url = browser_url or os.getenv("VIORUS_BROWSER_URL", BROWSER_URL)
@@ -201,6 +204,13 @@ def make_executor(
             raise RuntimeError(
                 "no payment transport is configured — refused; nothing was charged"
             )
+
+        # ── opt-in routine suggestions (Prepare / Execute) ────────────────
+        if tool == "system.suggest_routine":
+            return _suggest_routine(args, routine_store=routine_store, task_store=task_store)
+        if tool == "system.create_routine":
+            # Engine only calls this AFTER the Execute-tier approval gate.
+            return _create_routine(args, routine_store=routine_store)
 
         # ── computer agent ────────────────────────────────────────────────
         if tool in (
@@ -526,6 +536,92 @@ def _set_reminder(args: dict) -> dict:
             "stored": True,
             "reminder": reminder,
             "delivery": "local file only — no notification transport is configured",
+        },
+    }
+
+
+def _suggest_routine(args: dict, *, routine_store=None, task_store=None) -> dict:
+    """Mine local task history and return Prepare-tier suggestions.
+
+    Mining is dark until the user explicitly opts in. Even when enabled this
+    only *observes* — it never schedules, writes an automation, or fires a tool.
+    """
+    from packages.shared.routine_miner import RoutineMiner
+    from packages.shared.routine_settings import RoutineSettingsStore
+
+    settings = routine_store or RoutineSettingsStore()
+    if not settings.opted_in():
+        return {
+            "ok": True,
+            "tool": "system.suggest_routine",
+            "result": {
+                "opted_in": False,
+                "suggestions": [],
+                "count": 0,
+                "note": "routine mining is off — opt in before asking for suggestions",
+            },
+        }
+    if task_store is None:
+        return {
+            "ok": True,
+            "tool": "system.suggest_routine",
+            "result": {
+                "opted_in": True,
+                "suggestions": [],
+                "count": 0,
+                "note": "no task history is available to mine in this runtime",
+            },
+        }
+    miner = RoutineMiner(task_store=task_store)
+    patterns = miner.find_routines()
+    return {
+        "ok": True,
+        "tool": "system.suggest_routine",
+        "result": {
+            "opted_in": True,
+            "suggestions": [p.to_dict() for p in patterns],
+            "count": len(patterns),
+            "note": "proposals only — no automation was created or scheduled",
+        },
+    }
+
+
+def _create_routine(args: dict, *, routine_store=None) -> dict:
+    """Record an approved automation proposal after the Execute gate passed.
+
+    This handler is reachable only once the engine confirmed an approval for
+    this exact (task, step, idempotency_key, args). It writes a local proposal
+    record — nothing is scheduled or executed by this function.
+    """
+    from packages.shared.routine_settings import RoutineSettingsStore
+
+    pattern_id = args.get("pattern_id")
+    if not pattern_id:
+        raise RuntimeError("pattern_id is required to accept a routine")
+    settings = routine_store or RoutineSettingsStore()
+    if not settings.opted_in():
+        raise RuntimeError("routine automation requires explicit opt-in")
+    record = settings.accept(
+        pattern_id,
+        {
+            "description": args.get("description"),
+            "tool": args.get("tool"),
+            "sequence": args.get("sequence") or [],
+            "time_pattern": args.get("time_pattern"),
+            "via": "system.create_routine",
+        },
+    )
+    return {
+        "ok": True,
+        "tool": "system.create_routine",
+        "result": {
+            "accepted": True,
+            "pattern_id": pattern_id,
+            "record": record,
+            "note": (
+                "recorded as an approved automation proposal — no scheduler, "
+                "credential, or config was changed"
+            ),
         },
     }
 

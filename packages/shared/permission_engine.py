@@ -647,6 +647,34 @@ def register_phase6_connector_tools() -> None:
             PermissionEngine.register(tool)
 
 
+# ─── Phase 7 routine suggestions (Prompt 7.4) ─────────────────────────────────
+# Suggestions are Prepare: shown, never sent, and never create an automation.
+# Turning one into an automation is a separate Execute step with a diff card.
+
+_PHASE7_ROUTINE_TOOLS = [
+    ToolRegistration(
+        tool_name="system.suggest_routine",
+        tier=RiskTier.PREPARE,
+        confirmation_required=False,
+        description="Propose repeated action sequences mined from local task history (shown, never sent)",
+    ),
+    ToolRegistration(
+        tool_name="system.create_routine",
+        tier=RiskTier.EXECUTE,
+        confirmation_required=True,
+        description="Record a previously suggested routine as an approved automation proposal",
+        diff_card_fields=["pattern_id", "description", "tool", "time_pattern", "sequence"],
+    ),
+]
+
+
+def register_phase7_routine_tools() -> None:
+    """Register the opt-in routine suggestion + approval-gated acceptance tools."""
+    for tool in _PHASE7_ROUTINE_TOOLS:
+        if not PermissionEngine.is_registered(tool.tool_name):
+            PermissionEngine.register(tool)
+
+
 def register_all_tools() -> None:
     """Register every statically known tool, then freeze at the call site.
 
@@ -662,3 +690,4 @@ def register_all_tools() -> None:
     register_phase3_files_tools()
     register_phase5_remote_tools()
     register_phase6_connector_tools()
+    register_phase7_routine_tools()

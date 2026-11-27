@@ -31,9 +31,10 @@ desktop.ini
 pgdata/
 # Device pairing is generated at runtime and holds the local signing secret.
 vioris_data/pairing.json
-# Local HMAC key and runtime databases are machine state, never source.
+# Local HMAC key, runtime databases and opt-in settings are machine state.
 vioris_data/*.key
 vioris_data/*.db
+vioris_data/routine_settings.json
 
 # Node
 node_modules/

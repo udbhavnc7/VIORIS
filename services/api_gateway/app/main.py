@@ -172,6 +172,18 @@ class MemoryQueryPayload(BaseModel):
     limit: int = Field(default=20, ge=1, le=200)
 
 
+class RoutineOptInPayload(BaseModel):
+    enabled: bool
+
+
+class RoutineCreatePayload(BaseModel):
+    pattern_id: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+    tool: str | None = None
+    sequence: list[str] | None = None
+    time_pattern: str | None = None
+
+
 class KnowledgeIngestPayload(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     path: str = Field(min_length=1, max_length=1000)
@@ -1840,6 +1852,34 @@ async def v1_memory_correct(
 async def v1_memory_delete(memory_id: str, device: Device = Depends(_require_device)) -> dict:
     result = await _memory_request("DELETE", f"/memory/{memory_id}")
     return {"device": device.device_id, "result": result}
+
+
+# ─── opt-in routine suggestions (Phase 7.4) ──────────────────────────────────
+# Mining is Prepare-tier; accepting a proposal is Execute-tier and pauses for
+# the same approval ledger as every other externally visible action. The phone
+# can only ask — the gateway never bypasses the task-runner's gate.
+
+
+@app.post("/v1/routines/opt-in")
+async def v1_routine_opt_in(
+    req: RoutineOptInPayload, device: Device = Depends(_require_device)
+) -> dict:
+    result = await _proxy("POST", "/routines/opt-in", device, req.model_dump())
+    return {"device": device.device_id, "result": result}
+
+
+@app.get("/v1/routines/suggestions")
+async def v1_routine_suggestions(device: Device = Depends(_require_device)) -> dict:
+    result = await _proxy("GET", "/routines/suggestions", device)
+    return {"device": device.device_id, "suggestions": result}
+
+
+@app.post("/v1/routines/create")
+async def v1_routine_create(
+    req: RoutineCreatePayload, device: Device = Depends(_require_device)
+) -> dict:
+    result = await _proxy("POST", "/routines/create", device, req.model_dump(exclude_none=True))
+    return {"device": device.device_id, "task": result}
 
 
 # ─── knowledge (Phase 4 / local vector index) ───────────────────────────────

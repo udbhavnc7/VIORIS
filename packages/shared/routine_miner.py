@@ -21,6 +21,7 @@ Mining strategy:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from collections import Counter, defaultdict
@@ -46,6 +47,7 @@ class TaskRecord:
     tool: str | None = None
     created_at: datetime | None = None
     status: str = "completed"
+    sequence: list[str] = field(default_factory=list)  # ordered tools in the task
 
 
 @dataclass
@@ -57,6 +59,7 @@ class RoutinePattern:
     tool: str  # the tool/action that repeats
     occurrences: int  # how many times observed
     time_pattern: str | None = None  # e.g. "weekday_morning", "daily_9am"
+    sequence: list[str] = field(default_factory=list)  # repeated ordered tool sequence
     sample_requests: list[str] = field(default_factory=list)  # example utterances
     confidence: float = 0.0  # 0.0–1.0, how confident we are this is a real routine
 
@@ -67,9 +70,45 @@ class RoutinePattern:
             "tool": self.tool,
             "occurrences": self.occurrences,
             "time_pattern": self.time_pattern,
+            "sequence": list(self.sequence),
             "sample_requests": self.sample_requests,
             "confidence": self.confidence,
         }
+
+
+class TaskHistoryAdapter:
+    """Adapt ``TaskManager.list_tasks()`` (Pydantic Tasks with steps) to the
+    dict shape the miner consumes.
+
+    Tools live on the task's *steps*, not on the task itself, so the adapter
+    flattens them into an ordered ``sequence``. This is the only bridge between
+    the durable task store and mining — no miner code imports the task runner.
+    """
+
+    def __init__(self, task_manager: Any) -> None:
+        self.task_manager = task_manager
+
+    def list_tasks(self, limit: int = 200) -> list[dict[str, Any]]:
+        tasks = self.task_manager.list_tasks(limit=limit)
+        records: list[dict[str, Any]] = []
+        for task in tasks:
+            data = task.model_dump() if hasattr(task, "model_dump") else dict(task)
+            steps = data.get("steps") or []
+            sequence = [
+                step.get("tool") for step in steps if isinstance(step, dict) and step.get("tool")
+            ]
+            status = data.get("status")
+            records.append(
+                {
+                    "task_id": data.get("task_id"),
+                    "request": data.get("request") or "",
+                    "tool": sequence[0] if sequence else None,
+                    "created_at": data.get("created_at"),
+                    "status": getattr(status, "value", status) if status is not None else "completed",
+                    "sequence": sequence,
+                }
+            )
+        return records
 
 
 class RoutineMiner:
@@ -108,6 +147,9 @@ class RoutineMiner:
         # Strategy 2: Time-based patterns (same action at similar times)
         patterns.extend(self._find_time_patterns(tasks))
 
+        # Strategy 3: Repeated ordered sequences ("Slack + VSCode + mute")
+        patterns.extend(self._find_sequence_patterns(tasks))
+
         # Deduplicate and sort by confidence
         seen = set()
         unique = []
@@ -121,21 +163,33 @@ class RoutineMiner:
         return unique
 
     def _get_recent_tasks(self) -> list[TaskRecord]:
-        """Retrieve recent tasks from the store."""
+        """Retrieve recent tasks from the store, limited by ``window_days``."""
+        cutoff = datetime.now(UTC) - timedelta(days=self.window_days)
+
+        def within_window(record: TaskRecord) -> bool:
+            if record.created_at is None:
+                return True  # undated records are kept; no evidence to drop them
+            created = record.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=UTC)
+            return created >= cutoff
+
         # Try to get tasks from the store's task table
         try:
             if hasattr(self.task_store, "list_tasks"):
                 tasks = self.task_store.list_tasks(limit=200)
-                return [
+                records = [
                     TaskRecord(
                         task_id=t.get("task_id", ""),
                         request=t.get("request", ""),
                         tool=t.get("tool"),
                         created_at=self._parse_dt(t.get("created_at")),
                         status=t.get("status", "completed"),
+                        sequence=list(t.get("sequence") or []),
                     )
                     for t in tasks
                 ]
+                return [r for r in records if within_window(r)]
         except Exception as exc:
             logger.warning("Failed to list tasks from store: %s", exc)
 
@@ -145,7 +199,7 @@ class RoutineMiner:
                 from packages.shared.schemas import MemoryCategory
 
                 memories = self.task_store.list(category=MemoryCategory.ROUTINES)
-                return [
+                records = [
                     TaskRecord(
                         task_id=m.memory_id,
                         request=m.content,
@@ -155,6 +209,7 @@ class RoutineMiner:
                     )
                     for m in memories
                 ]
+                return [r for r in records if within_window(r)]
         except Exception:
             pass
 
@@ -243,6 +298,39 @@ class RoutineMiner:
             )
             patterns.append(pattern)
 
+        return patterns
+
+    def _find_sequence_patterns(self, tasks: list[TaskRecord]) -> list[RoutinePattern]:
+        """Find ordered tool sequences that repeat across separate tasks."""
+        groups: dict[tuple[str, ...], list[TaskRecord]] = defaultdict(list)
+        seen_tasks: set[str] = set()
+        for task in tasks:
+            sequence = tuple(task.sequence)
+            # One record per step is supplied by the adapter; count each task once.
+            if len(sequence) < 2 or task.task_id in seen_tasks:
+                continue
+            seen_tasks.add(task.task_id)
+            groups[sequence].append(task)
+
+        patterns: list[RoutinePattern] = []
+        for sequence, group in groups.items():
+            if len(group) < self.min_occurrences:
+                continue
+            time_pattern = self._detect_time_pattern(group)
+            digest = hashlib.sha1(" → ".join(sequence).encode()).hexdigest()[:10]
+            confidence = min(1.0, 0.4 + len(group) * 0.1 + (0.2 if time_pattern else 0))
+            patterns.append(
+                RoutinePattern(
+                    pattern_id=f"seq_{digest}_{len(patterns)}",
+                    description="you often run: " + " → ".join(sequence),
+                    tool=sequence[0],
+                    occurrences=len(group),
+                    time_pattern=time_pattern,
+                    sequence=list(sequence),
+                    sample_requests=[t.request for t in group[:3]],
+                    confidence=confidence,
+                )
+            )
         return patterns
 
     def _cluster_by_similarity(self, tasks: list[TaskRecord]) -> list[list[TaskRecord]]:
