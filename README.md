@@ -30,6 +30,7 @@ python run_vioris.py --no-demo              # no sample connectors
 python run_vioris.py --no-agent             # skip the computer agent
 python run_vioris.py --critical-pin 1234    # allow Critical steps for this run
 python run_vioris.py --no-ui                # backend only
+python run_vioris.py --gmail                # start the real Gmail connector on 8445
 ```
 
 | Service | Port | Role |
@@ -39,7 +40,28 @@ python run_vioris.py --no-ui                # backend only
 | Task runner | 8421 | planning, approvals, execution, verification, hash-chained audit |
 | Memory | 8441 | local memory store |
 | Computer agent | 8430 | screen mirror and remote input (optional) |
+| Gmail connector | 8445 | real Gmail account, read-only by default (`--gmail`) |
 | Demo connectors | 8460 | sample read payloads; writes refuse honestly |
+
+### Connect real Gmail
+
+Gmail stays in honest demo mode until you opt in. To use your own account:
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create or select a project and enable the **Gmail API**.
+2. Configure the **OAuth consent screen** (External), add your own Google account as a **Test user**, and add only the `gmail.readonly` scope for now.
+3. Create an **OAuth client ID** of type **Web application** and add this authorized redirect URI: `http://127.0.0.1:8445/oauth/authorized`.
+4. Set the credentials in the shell that starts Vioris — never paste them into chat or commit them:
+
+   ```powershell
+   $env:VIORIS_GMAIL_CLIENT_ID = "your-client-id"
+   $env:VIORIS_GMAIL_CLIENT_SECRET = "your-client-secret"
+   python run_vioris.py --no-build --gmail
+   ```
+
+5. Call `POST http://127.0.0.1:8445/connect/start` (or `POST /v1/gmail/connect/start` from the paired phone), then open the returned `authorize_url` in your browser. Google redirects back to the local callback, which stores the token only in the encrypted vault and shows a safe summary.
+6. Confirm `GET /v1/gmail/accounts` and `GET /v1/gmail/digest`. The Connections screen will show Gmail as **live** rather than sample data.
+
+Reads are Observe-tier and never prompt for approval. Sending or reacting is a separate opt-in: `POST /v1/gmail/connect/start` with `{"include_write": true}` requests `gmail.modify` and `gmail.send`, and those tools still stop at the approval ledger before touching your mailbox.
 
 For phone access, put the laptop and the phone on a [Tailscale](https://tailscale.com) tailnet and pair the device from the UI. No public inbound port is ever opened. See [`docs/08-free-stack-and-remote-access.md`](./docs/08-free-stack-and-remote-access.md).
 
@@ -49,7 +71,7 @@ For phone access, put the laptop and the phone on a [Tailscale](https://tailscal
 
 What is deliberately simulated:
 
-- **Connectors are honest demo mode by default.** Gmail, WhatsApp, Calendar, Contacts, Notes, Files, Bookmarks, History, Telephony, Reservations, and Smart Home return sample *reads* with a `demo: true` marker until real credentials are configured. Every *write* — send a message, create a reservation, start a call, control a device — is refused by the sample service and reported as failed in the audit chain. Nothing claims to have been sent when it was not. Real Gmail writes are opt-in: `POST /connect/start` with `{"include_write": true}` requests `gmail.modify` and `gmail.send`, and only the separate write connector uses them. Reads stay read-only.
+- **Connectors are honest demo mode by default.** Gmail, WhatsApp, Calendar, Contacts, Notes, Files, Bookmarks, History, Telephony, Reservations, and Smart Home return sample *reads* with a `demo: true` marker until real credentials are configured. Every *write* — send a message, create a reservation, start a call, control a device — is refused by the sample service and reported as failed in the audit chain. Nothing claims to have been sent when it was not. Real Gmail is now available with `--gmail` and OAuth client credentials: reads are Observe-tier and stay read-only by default. Real Gmail writes are opt-in: `POST /connect/start` with `{"include_write": true}` requests `gmail.modify` and `gmail.send`, and only the separate write connector uses them. Reads stay read-only.
 - **Proactive calls are data-driven.** The spoken digest is composed from whatever the connected connectors return, using the dialogue layer's decomposer/composer. The scripted driving scenario is an explicit demo (`{"force": true, "demo": true}` on `/v1/call/trigger`); scheduled production calls never use it, and demo contacts are not seeded by default. You can add your own triggers in the Call screen — a daily time or a task-completion substring. They persist locally in `vioris_data/call_triggers.json`, are checked every 60 seconds, and open the same in-app call session (not a phone call). A failed call is not marked fired, so it retries on the next check.
 - **Critical is locked by default.** Critical steps require `--critical-pin`, an HMAC second factor, and a five-second cooldown before the decision is accepted. A fresh voiceprint can replace the PIN as the second factor, but only when explicitly enabled: start with `VIORIS_VOICEPRINT_ENABLED=1` (and optional `VIORIS_VOICEPRINT_ENCODER`, `VIORIS_VOICEPRINT_FILE`, `VIORIS_VOICEPRINT_THRESHOLD`), enroll once via `POST /v1/voiceprint/enroll` with base64 PCM16 segments, and confirm a Critical action in a voiceprint-verified call with the distinct phrase "confirm critical". A bare "yes" is never enough; the proof is approval-scoped, expires, and is re-verified by the task runner. The `fake` encoder is for local dev only — it is energy-based, not speaker-aware.
 - **The computer agent is local-only.** Screen mirroring and remote input work over loopback/Tailscale; they are not exposed publicly.

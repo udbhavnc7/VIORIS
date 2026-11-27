@@ -16,10 +16,12 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from html import escape
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from packages.shared.permission_engine import (
@@ -48,6 +50,25 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Vioris Gmail Connector", version="0.1.0", lifespan=lifespan)
 
+
+def _data_dir() -> Path:
+    """Resolve the shared data dir, accepting the historical VIORUS_ spelling."""
+    raw = os.getenv("VIORIS_DATA_DIR") or os.getenv("VIORUS_DATA_DIR", "vioris_data")
+    return Path(raw)
+
+
+def _credentials() -> tuple[str, str]:
+    """Resolve Google OAuth credentials. VIORIS_ is canonical; VIORUS_ is
+    accepted so older local setups keep working. Values never enter logs."""
+    client_id = os.getenv("VIORIS_GMAIL_CLIENT_ID") or os.getenv(
+        "VIORUS_GMAIL_CLIENT_ID", ""
+    )
+    client_secret = os.getenv("VIORIS_GMAIL_CLIENT_SECRET") or os.getenv(
+        "VIORUS_GMAIL_CLIENT_SECRET", ""
+    )
+    return client_id, client_secret
+
+
 _vault: TokenVault | None = None
 _connector: GmailConnector | None = None
 _write_connector: GmailWriteConnector | None = None
@@ -58,7 +79,7 @@ _pending: dict[str, tuple[str, bool]] = {}
 def get_vault() -> TokenVault:
     global _vault
     if _vault is None:
-        base = Path(os.getenv("VIORUS_DATA_DIR", "vioris_data"))
+        base = _data_dir()
         _vault = TokenVault(base / "tokens.db", key_file=base / "token.key")
     return _vault
 
@@ -66,8 +87,7 @@ def get_vault() -> TokenVault:
 def get_connector() -> GmailConnector:
     global _connector
     if _connector is None:
-        client_id = os.getenv("VIORUS_GMAIL_CLIENT_ID", "")
-        client_secret = os.getenv("VIORUS_GMAIL_CLIENT_SECRET", "")
+        client_id, client_secret = _credentials()
         transport = HttpxGmailTransport(client_id, client_secret)
         with_clone = GmailConnector(get_vault(), transport=transport)
         _connector = with_clone
@@ -78,8 +98,7 @@ def get_write_connector() -> GmailWriteConnector:
     """The separate write connector. It never reuses the read path."""
     global _write_connector
     if _write_connector is None:
-        client_id = os.getenv("VIORIS_GMAIL_CLIENT_ID", "")
-        client_secret = os.getenv("VIORIS_GMAIL_CLIENT_SECRET", "")
+        client_id, client_secret = _credentials()
         transport = HttpxGmailTransport(client_id, client_secret)
         _write_connector = GmailWriteConnector(get_vault(), transport=transport)
     return _write_connector
@@ -89,8 +108,7 @@ def get_approval_store():
     """Open the task-runner's approval ledger (shared DB, same data dir)."""
     from services.task_runner.app.approvals import ApprovalStore
 
-    base = Path(os.getenv("VIORUS_DATA_DIR", "vioris_data"))
-    return ApprovalStore(base / "task_runner.db")
+    return ApprovalStore(_data_dir() / "task_runner.db")
 
 
 def _approval_verifier(
@@ -217,6 +235,54 @@ def connect_complete(state: str, code: str, redirect_uri: str | None = None) -> 
     except RateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     return summary
+
+
+@app.get("/oauth/authorized", response_class=HTMLResponse)
+def oauth_authorized(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> HTMLResponse:
+    """Google redirects here after consent.
+
+    The authorization code is a single-use credential for the local vault, so
+    this page finishes the exchange immediately and shows only a safe summary —
+    never the code, token, or secret. Anything unexpected is reported honestly.
+    """
+    if error:
+        detail = escape(error)
+        return HTMLResponse(
+            "<!doctype html><meta charset='utf-8'><title>Vioris — Gmail</title>"
+            "<body><h2>Gmail was not connected</h2>"
+            f"<p>Google reported: {detail}</p>"
+            "<p>You can close this tab and try again.</p></body>"
+        )
+    if not code or not state:
+        return HTMLResponse(
+            "<!doctype html><meta charset='utf-8'><title>Vioris — Gmail</title>"
+            "<body><h2>Gmail was not connected</h2>"
+            "<p>Missing code or state in the OAuth callback.</p></body>",
+            status_code=400,
+        )
+    try:
+        summary = connect_complete(state=state, code=code)
+    except HTTPException as exc:
+        detail = escape(str(exc.detail))
+        return HTMLResponse(
+            "<!doctype html><meta charset='utf-8'><title>Vioris — Gmail</title>"
+            "<body><h2>Gmail was not connected</h2>"
+            f"<p>{detail}</p></body>",
+            status_code=exc.status_code,
+        )
+    account = escape(str(summary.get("account", "Gmail")))
+    scopes = escape(", ".join(summary.get("scopes", [])))
+    return HTMLResponse(
+        "<!doctype html><meta charset='utf-8'><title>Vioris — Gmail connected</title>"
+        "<body><h2>Gmail connected</h2>"
+        f"<p>Account: {account}</p><p>Scopes: {scopes}</p>"
+        "<p>Tokens are stored only in Vioris's local encrypted vault. "
+        "You can close this tab.</p></body>"
+    )
 
 
 @app.get("/digest")

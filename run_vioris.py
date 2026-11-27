@@ -252,6 +252,11 @@ def main() -> int:
     parser.add_argument("--no-demo", action="store_true", help="do not start sample connectors")
     parser.add_argument("--no-ui", action="store_true", help="backend only")
     parser.add_argument("--no-agent", action="store_true", help="skip the computer agent")
+    parser.add_argument(
+        "--gmail",
+        action="store_true",
+        help="start the real Gmail connector on 8445 (requires OAuth client credentials)",
+    )
     parser.add_argument("--no-build", action="store_true", help="use the existing UI build as-is")
     parser.add_argument("--open", action="store_true", help="open the interface in a browser")
     parser.add_argument("--gateway-port", type=int, default=8420)
@@ -297,6 +302,23 @@ def main() -> int:
         ):
             env[f"VIORUS_{name.upper()}_URL"] = f"http://127.0.0.1:8460/{name}"
 
+    if args.gmail:
+        client_id = os.getenv("VIORIS_GMAIL_CLIENT_ID") or os.getenv(
+            "VIORUS_GMAIL_CLIENT_ID", ""
+        )
+        client_secret = os.getenv("VIORIS_GMAIL_CLIENT_SECRET") or os.getenv(
+            "VIORUS_GMAIL_CLIENT_SECRET", ""
+        )
+        if not client_id or not client_secret:
+            print(
+                "  --gmail needs VIORIS_GMAIL_CLIENT_ID and VIORIS_GMAIL_CLIENT_SECRET "
+                "in the environment."
+            )
+            return 1
+        # Override the demo URL set above: Gmail now talks to its real connector.
+        env["VIORUS_GMAIL_URL"] = "http://127.0.0.1:8445"
+        env["VIORIS_GMAIL_LIVE"] = "1"
+
     if not args.no_ui:
         if not build_ui(env, force=not args.no_build):
             print("Could not build the interface. Fix the error above and try again.")
@@ -311,6 +333,12 @@ def main() -> int:
         Service("memory", "Memory", 8441, "services.memory_service.app.api:app", "/memory", "violet"),
         Service("runner", "Task runner", 8421, "services.task_runner.app.api:app", "/tasks", "green"),
     ]
+    if args.gmail:
+        services.append(
+            Service(
+                "gmail", "Gmail connector", 8445, "integrations.gmail.api:app", "/health", "green"
+            )
+        )
     if not args.no_agent:
         services.extend(local_agent_services(include_computer=True))
     services.append(
@@ -409,6 +437,11 @@ def main() -> int:
         )
         if demo:
             print("    Data mode   " + color("blue", "demo - sample reads, writes refuse honestly"))
+        if args.gmail:
+            print(
+                "    Gmail       "
+                + color("green", "live connector on 8445 (read-only unless write scopes are opted in)")
+            )
         print(color("dim", "\n  Press Ctrl+C to stop everything.\n"))
 
         if ui_proc and args.open:

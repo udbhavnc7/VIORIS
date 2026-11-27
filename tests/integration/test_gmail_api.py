@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import tempfile
 
+import pytest
 from fastapi.testclient import TestClient
 
 import integrations.gmail.api as gmail_api
@@ -369,3 +370,64 @@ def test_reply_fires_with_approved_ledger_and_is_idempotent() -> None:
         assert len(transport.sent) == 1
     finally:
         client.__exit__(None, None, None)
+
+
+# ── real-account wiring: OAuth callback + env resolution ────────────────────
+
+
+def test_oauth_callback_completes_connection_and_hides_secrets() -> None:
+    transport = MockGmailTransport()
+    transport._auth_scope = "https://www.googleapis.com/auth/gmail.readonly"
+    client = _make_client(transport)
+    try:
+        start = client.post("/connect/start", json={})
+        assert start.status_code == 200
+        state = start.json()["state"]
+
+        callback = client.get(f"/oauth/authorized?state={state}&code=mockcode")
+        assert callback.status_code == 200
+        assert "Gmail connected" in callback.text
+        assert "mock-user@gmail.com" in callback.text
+        assert "mockcode" not in callback.text
+        assert "client_secret" not in callback.text.lower()
+
+        assert client.get("/accounts").json()[0]["account"] == "mock-user@gmail.com"
+        assert client.get("/digest").status_code == 200
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_oauth_callback_reports_provider_error_honestly() -> None:
+    client = _make_client(MockGmailTransport())
+    try:
+        callback = client.get("/oauth/authorized?error=access_denied")
+        assert callback.status_code == 200
+        assert "not connected" in callback.text
+        assert "access_denied" in callback.text
+        assert client.get("/accounts").json() == []
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_oauth_callback_rejects_missing_code_or_state() -> None:
+    client = _make_client(MockGmailTransport())
+    try:
+        assert client.get("/oauth/authorized").status_code == 400
+        assert client.get("/oauth/authorized?code=only-code").status_code == 400
+        assert client.get("/oauth/authorized?state=only-state").status_code == 400
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_credentials_prefer_vioris_env_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VIORIS_GMAIL_CLIENT_ID", "canonical-id")
+    monkeypatch.setenv("VIORIS_GMAIL_CLIENT_SECRET", "canonical-secret")
+    monkeypatch.setenv("VIORUS_GMAIL_CLIENT_ID", "legacy-id")
+    monkeypatch.setenv("VIORUS_GMAIL_CLIENT_SECRET", "legacy-secret")
+    assert gmail_api._credentials() == ("canonical-id", "canonical-secret")
+
+
+def test_data_dir_prefers_vioris_env_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VIORIS_DATA_DIR", "canonical-data")
+    monkeypatch.setenv("VIORUS_DATA_DIR", "legacy-data")
+    assert gmail_api._data_dir().name == "canonical-data"

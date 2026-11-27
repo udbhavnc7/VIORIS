@@ -30,7 +30,7 @@ from pathlib import Path
 logger = logging.getLogger("vioris.gateway")
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -72,6 +72,9 @@ MEMORY_URL = os.getenv("VIORIS_MEMORY_URL") or os.getenv(
 )
 KNOWLEDGE_URL = os.getenv("VIORIS_KNOWLEDGE_URL") or os.getenv(
     "VIORUS_KNOWLEDGE_URL", "http://127.0.0.1:8442"
+)
+GMAIL_CONNECTOR_URL = os.getenv("VIORUS_GMAIL_URL") or os.getenv(
+    "VIORIS_GMAIL_URL", "http://127.0.0.1:8445"
 )
 GATEWAY_HOST = os.getenv("VIORIS_API_HOST", "0.0.0.0")
 GATEWAY_PORT = int(os.getenv("VIORIS_API_PORT", "8420"))
@@ -1927,6 +1930,97 @@ async def v1_knowledge_query(
     return {"device": device.device_id, "result": result}
 
 
+# ─── Gmail connector (real account, read-only by default) ───────────────────
+
+
+class GmailConnectStart(BaseModel):
+    redirect_uri: str | None = None
+    #: Write scopes are never implied. This is the opt-in knob for replies/reactions.
+    include_write: bool = False
+
+
+async def _gmail_request(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    body: dict | None = None,
+) -> dict:
+    """Proxy to the local Gmail connector. The gateway verifies the paired
+    device; the connector keeps tokens in its vault and re-checks the static
+    permission registry before any read or write."""
+    url = f"{GMAIL_CONNECTOR_URL.rstrip('/')}{path}"
+    try:
+        resp = await _client().request(
+            method, url, params=params, json=body, timeout=20.0
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"Gmail connector unreachable: {exc}") from exc
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        payload = {"detail": resp.text}
+    if resp.status_code >= 400:
+        detail = payload.get("detail") if isinstance(payload, dict) else str(payload)
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return payload
+
+
+@app.post("/v1/gmail/connect/start")
+async def v1_gmail_connect_start(
+    req: GmailConnectStart, device: Device = Depends(_require_device)
+) -> dict:
+    body: dict = {"include_write": req.include_write}
+    if req.redirect_uri:
+        body["redirect_uri"] = req.redirect_uri
+    return {"device": device.device_id, **await _gmail_request("POST", "/connect/start", body=body)}
+
+
+@app.post("/v1/gmail/connect/complete")
+async def v1_gmail_connect_complete(
+    state: str,
+    code: str,
+    redirect_uri: str | None = None,
+    device: Device = Depends(_require_device),
+) -> dict:
+    params: dict = {"state": state, "code": code}
+    if redirect_uri:
+        params["redirect_uri"] = redirect_uri
+    return {
+        "device": device.device_id,
+        "result": await _gmail_request("POST", "/connect/complete", params=params),
+    }
+
+
+@app.get("/v1/gmail/accounts")
+async def v1_gmail_accounts(device: Device = Depends(_require_device)) -> dict:
+    accounts = await _gmail_request("GET", "/accounts")
+    return {"device": device.device_id, "accounts": accounts}
+
+
+@app.get("/v1/gmail/digest")
+async def v1_gmail_digest(
+    hours: int = Query(default=24, ge=1, le=168),
+    max_results: int = Query(default=20, ge=1, le=50),
+    account: str | None = None,
+    device: Device = Depends(_require_device),
+) -> dict:
+    params: dict = {"hours": hours, "max_results": max_results}
+    if account:
+        params["account"] = account
+    return {"device": device.device_id, "digest": await _gmail_request("GET", "/digest", params=params)}
+
+
+@app.post("/v1/gmail/disconnect/{account}")
+async def v1_gmail_disconnect(
+    account: str, device: Device = Depends(_require_device)
+) -> dict:
+    return {
+        "device": device.device_id,
+        "result": await _gmail_request("POST", f"/disconnect/{account}"),
+    }
+
+
 # ─── connections: honest status of every integration ────────────────────────
 
 
@@ -1976,6 +2070,9 @@ async def v1_connections(device: Device = Depends(_require_device)) -> dict:
     # even while the sample connectors are switched on.
     health_path = {"computer": "/windows"}
     local_only = {"computer", "browser", "documents", "knowledge"}
+    # A locally started real connector is not demo data, even while the other
+    # sample connectors are switched on.
+    live_local = {"gmail"} if os.getenv("VIORIS_GMAIL_LIVE") == "1" else set()
 
     async def probe_entry(key: str, env: str) -> tuple[bool, str]:
         base = os.getenv(env)
@@ -1992,6 +2089,8 @@ async def v1_connections(device: Device = Depends(_require_device)) -> dict:
     ):
         if not reachable:
             mode = "off"
+        elif key in live_local:
+            mode = "live"
         elif key in local_only:
             mode = "local"
         else:
