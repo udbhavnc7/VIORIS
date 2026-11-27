@@ -13,6 +13,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -59,13 +60,26 @@ def _data_dir() -> Path:
 
 def _credentials() -> tuple[str, str]:
     """Resolve Google OAuth credentials. VIORIS_ is canonical; VIORUS_ is
-    accepted so older local setups keep working. Values never enter logs."""
+    accepted so older local setups keep working. As a chat-safe alternative,
+    credentials can live in vioris_data/gmail_credentials.json, which is
+    gitignored. Values never enter logs or responses."""
     client_id = os.getenv("VIORIS_GMAIL_CLIENT_ID") or os.getenv(
         "VIORUS_GMAIL_CLIENT_ID", ""
     )
     client_secret = os.getenv("VIORIS_GMAIL_CLIENT_SECRET") or os.getenv(
         "VIORUS_GMAIL_CLIENT_SECRET", ""
     )
+    if client_id and client_secret:
+        return client_id, client_secret
+    cred_file = _data_dir() / "gmail_credentials.json"
+    if cred_file.exists():
+        try:
+            data = json.loads(cred_file.read_text("utf-8"))
+            client_id = client_id or str(data.get("client_id", ""))
+            client_secret = client_secret or str(data.get("client_secret", ""))
+        except (OSError, ValueError):
+            # Corrupt or unreadable file fails closed: empty credentials.
+            pass
     return client_id, client_secret
 
 
@@ -88,6 +102,8 @@ def get_connector() -> GmailConnector:
     global _connector
     if _connector is None:
         client_id, client_secret = _credentials()
+        if not client_id or not client_secret:
+            raise HTTPException(status_code=503, detail="Gmail OAuth credentials are not configured")
         transport = HttpxGmailTransport(client_id, client_secret)
         with_clone = GmailConnector(get_vault(), transport=transport)
         _connector = with_clone
@@ -99,6 +115,8 @@ def get_write_connector() -> GmailWriteConnector:
     global _write_connector
     if _write_connector is None:
         client_id, client_secret = _credentials()
+        if not client_id or not client_secret:
+            raise HTTPException(status_code=503, detail="Gmail OAuth credentials are not configured")
         transport = HttpxGmailTransport(client_id, client_secret)
         _write_connector = GmailWriteConnector(get_vault(), transport=transport)
     return _write_connector

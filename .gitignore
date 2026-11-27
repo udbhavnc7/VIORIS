@@ -35,6 +35,8 @@ vioris_data/pairing.json
 vioris_data/*.key
 vioris_data/*.db
 vioris_data/routine_settings.json
+# OAuth client credentials are machine secrets, never source.
+vioris_data/gmail_credentials.json
 
 # Node
 node_modules/

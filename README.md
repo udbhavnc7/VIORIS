@@ -50,13 +50,21 @@ Gmail stays in honest demo mode until you opt in. To use your own account:
 1. In [Google Cloud Console](https://console.cloud.google.com/), create or select a project and enable the **Gmail API**.
 2. Configure the **OAuth consent screen** (External), add your own Google account as a **Test user**, and add only the `gmail.readonly` scope for now.
 3. Create an **OAuth client ID** of type **Web application** and add this authorized redirect URI: `http://127.0.0.1:8445/oauth/authorized`.
-4. Set the credentials in the shell that starts Vioris — never paste them into chat or commit them:
+4. Set the credentials **locally** — never paste them into chat or commit them. Either use environment variables:
 
    ```powershell
    $env:VIORIS_GMAIL_CLIENT_ID = "your-client-id"
    $env:VIORIS_GMAIL_CLIENT_SECRET = "your-client-secret"
    python run_vioris.py --no-build --gmail
    ```
+
+   Or write a gitignored `vioris_data/gmail_credentials.json`:
+
+   ```json
+   { "client_id": "your-client-id", "client_secret": "your-client-secret" }
+   ```
+
+   and simply run `python run_vioris.py --no-build --gmail`.
 
 5. Call `POST http://127.0.0.1:8445/connect/start` (or `POST /v1/gmail/connect/start` from the paired phone), then open the returned `authorize_url` in your browser. Google redirects back to the local callback, which stores the token only in the encrypted vault and shows a safe summary.
 6. Confirm `GET /v1/gmail/accounts` and `GET /v1/gmail/digest`. The Connections screen will show Gmail as **live** rather than sample data.

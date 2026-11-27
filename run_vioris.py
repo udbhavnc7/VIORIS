@@ -28,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import signal
@@ -235,6 +236,31 @@ def build_ui(env: dict[str, str], force: bool) -> bool:
     return True
 
 
+def gmail_credentials() -> tuple[str, str]:
+    """Resolve Gmail OAuth credentials without ever printing them.
+
+    Environment variables win; a gitignored local JSON file is the chat-safe
+    alternative. Corrupt/unreadable files fail closed with empty values.
+    """
+    client_id = os.getenv("VIORIS_GMAIL_CLIENT_ID") or os.getenv(
+        "VIORUS_GMAIL_CLIENT_ID", ""
+    )
+    client_secret = os.getenv("VIORIS_GMAIL_CLIENT_SECRET") or os.getenv(
+        "VIORUS_GMAIL_CLIENT_SECRET", ""
+    )
+    if client_id and client_secret:
+        return client_id, client_secret
+    cred_file = DATA / "gmail_credentials.json"
+    if cred_file.exists():
+        try:
+            data = json.loads(cred_file.read_text("utf-8"))
+            client_id = client_id or str(data.get("client_id", ""))
+            client_secret = client_secret or str(data.get("client_secret", ""))
+        except (OSError, ValueError):
+            pass
+    return client_id, client_secret
+
+
 def stop_all(services: list[Service]) -> None:
     running = [service for service in services if service.proc and service.proc.poll() is None]
     for service in running:
@@ -303,16 +329,12 @@ def main() -> int:
             env[f"VIORUS_{name.upper()}_URL"] = f"http://127.0.0.1:8460/{name}"
 
     if args.gmail:
-        client_id = os.getenv("VIORIS_GMAIL_CLIENT_ID") or os.getenv(
-            "VIORUS_GMAIL_CLIENT_ID", ""
-        )
-        client_secret = os.getenv("VIORIS_GMAIL_CLIENT_SECRET") or os.getenv(
-            "VIORUS_GMAIL_CLIENT_SECRET", ""
-        )
+        client_id, client_secret = gmail_credentials()
         if not client_id or not client_secret:
             print(
-                "  --gmail needs VIORIS_GMAIL_CLIENT_ID and VIORIS_GMAIL_CLIENT_SECRET "
-                "in the environment."
+                "  --gmail needs Gmail OAuth credentials. Set "
+                "VIORIS_GMAIL_CLIENT_ID / VIORIS_GMAIL_CLIENT_SECRET, or write "
+                "vioris_data/gmail_credentials.json with client_id and client_secret."
             )
             return 1
         # Override the demo URL set above: Gmail now talks to its real connector.

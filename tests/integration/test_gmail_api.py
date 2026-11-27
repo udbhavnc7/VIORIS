@@ -8,6 +8,7 @@ the endpoint falls back to the permission engine's static classification.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 
@@ -431,3 +432,32 @@ def test_data_dir_prefers_vioris_env_name(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("VIORIS_DATA_DIR", "canonical-data")
     monkeypatch.setenv("VIORUS_DATA_DIR", "legacy-data")
     assert gmail_api._data_dir().name == "canonical-data"
+
+
+def test_credentials_fall_back_to_gitignored_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    for name in (
+        "VIORIS_GMAIL_CLIENT_ID",
+        "VIORIS_GMAIL_CLIENT_SECRET",
+        "VIORUS_GMAIL_CLIENT_ID",
+        "VIORUS_GMAIL_CLIENT_SECRET",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("VIORIS_DATA_DIR", str(tmp_path))
+    (tmp_path / "gmail_credentials.json").write_text(
+        json.dumps({"client_id": "file-id", "client_secret": "file-secret"}),
+        encoding="utf-8",
+    )
+    assert gmail_api._credentials() == ("file-id", "file-secret")
+
+
+def test_corrupt_credentials_file_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    for name in (
+        "VIORIS_GMAIL_CLIENT_ID",
+        "VIORIS_GMAIL_CLIENT_SECRET",
+        "VIORUS_GMAIL_CLIENT_ID",
+        "VIORUS_GMAIL_CLIENT_SECRET",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("VIORIS_DATA_DIR", str(tmp_path))
+    (tmp_path / "gmail_credentials.json").write_text("{not json", encoding="utf-8")
+    assert gmail_api._credentials() == ("", "")
