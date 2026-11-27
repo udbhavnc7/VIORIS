@@ -16,9 +16,17 @@ Run from the repo root:
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import json
 import logging
+import os
 import sys
+from dataclasses import dataclass
+from typing import Any, Callable
 
+import httpx
+
+from packages.shared.graceful_degradation import DegradationMode
 from packages.shared.permission_engine import (
     PermissionEngine,
     register_phase1_tools,
@@ -50,8 +58,33 @@ def print_registry() -> None:
         )
 
 
-def build_voice_loop():
-    """Build the Phase 1 voice pipeline from the environment config."""
+@dataclass
+class Runtime:
+    """Everything the local agent needs, shared by voice and text modes."""
+
+    cfg: Any
+    loop: Any
+    mode: DegradationMode
+    executor: Any
+    store: Any
+    kill_listener: Any
+
+
+def _module_available(name: str) -> Callable[[], bool]:
+    return lambda: importlib.util.find_spec(name) is not None
+
+
+def _ollama_available() -> bool:
+    base = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+    try:
+        with httpx.Client(timeout=1.5, trust_env=False) as client:
+            return client.get(base + "/api/tags").is_success
+    except httpx.HTTPError:
+        return False
+
+
+def build_runtime() -> Runtime:
+    """Build the local pipeline and determine the honest interaction mode."""
     from .config import AgentConfig
     from .executor import Executor
     from .services.audio_source import MicrophoneSource
@@ -78,7 +111,22 @@ def build_voice_loop():
     store = TaskStore(cfg.db_path)
     state = AgentStateMachine()
     kill_listener = KillPhraseListener(stop_fn=lambda: _stop_for_kill_phrase(state, store))
-    return VoiceLoop(
+    executor = Executor()
+
+    mode = DegradationMode()
+    mode.check_all(
+        stt,
+        tts,
+        wake,
+        probes={
+            "stt": _module_available("faster_whisper"),
+            "tts": lambda: voice is not None and _module_available("piper")(),
+            "wake": _module_available("openwakeword"),
+            "llm": _ollama_available,
+        },
+    )
+
+    loop = VoiceLoop(
         state,
         wake,
         clap,
@@ -86,10 +134,42 @@ def build_voice_loop():
         stt,
         source,
         cfg,
-        executor=Executor(),
+        executor=executor,
         store=store,
         kill_listener=kill_listener,
+        mode=mode,
     )
+    return Runtime(cfg, loop, mode, executor, store, kill_listener)
+
+
+def build_voice_loop():
+    """Backward-compatible accessor for the voice pipeline."""
+    return build_runtime().loop
+
+
+def _run_text_mode(runtime: Runtime) -> int:
+    """Text-only interaction through the same permission-gated command runner."""
+    from .command_runner import run_command
+    from .services.text_mode import run_text_session
+
+    def runner(text: str) -> dict:
+        return run_command(text, runtime.executor, runtime.store)
+
+    print("Vioris desktop agent - text mode (type 'exit' to stop)")
+    print("  Interaction mode: text_only")
+    degraded = [
+        name
+        for name, health in runtime.mode.summary().items()
+        if name != "mode" and health["status"] != "healthy"
+    ]
+    if degraded:
+        print(f"  Degraded: {', '.join(degraded)}")
+
+    try:
+        run_text_session(sys.stdin, print, runtime.mode, runner, runtime.kill_listener)
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    return 0
 
 
 def _stop_for_kill_phrase(state, store) -> list[str]:
@@ -119,17 +199,35 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="serve the local browser console at http://127.0.0.1:8000",
     )
+    parser.add_argument(
+        "--text",
+        action="store_true",
+        help="run text-only mode (no microphone or speakers)",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="print subsystem health and interaction mode, then exit",
+    )
     args = parser.parse_args(argv)
 
     bootstrap_registry()
 
     if args.web:
         return _run_web()
-    if args.listen:
-        loop = build_voice_loop()
+    if args.status:
+        runtime = build_runtime()
+        print(json.dumps(runtime.mode.summary(), indent=2))
+        return 0
+    if args.text or args.listen:
+        runtime = build_runtime()
+        if args.text or runtime.mode.is_text_only:
+            if args.listen and not args.text:
+                print("STT unavailable — switching to text-only mode (voice would be silent).")
+            return _run_text_mode(runtime)
         print("Vioris desktop agent — listening (Ctrl+C to stop)")
         try:
-            loop.run_forever()
+            runtime.loop.run_forever()
         except KeyboardInterrupt:
             print("\nStopped.")
         return 0

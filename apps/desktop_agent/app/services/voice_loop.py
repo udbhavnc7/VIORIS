@@ -24,6 +24,7 @@ import time
 import numpy as np
 
 from packages.shared.audit import compute_chain
+from packages.shared.graceful_degradation import SubsystemStatus
 from packages.shared.schemas import AgentState, AuditEvent
 
 from ..commands import handle as handle_command
@@ -50,6 +51,7 @@ class VoiceLoop:
         executor=None,
         store=None,
         kill_listener=None,
+        mode=None,
     ) -> None:
         self.state = state_machine
         self.wake = wake
@@ -61,6 +63,7 @@ class VoiceLoop:
         self.executor = executor
         self.store = store
         self.kill_listener = kill_listener
+        self.degradation = mode
         self.responses: list[tuple[str, str | None]] = []  # (transcript, reply)
         self.events: list[AuditEvent] = []
 
@@ -127,6 +130,12 @@ class VoiceLoop:
         except Exception as exc:
             logger.exception("STT failed; %s", exc)
             transcript = ""
+            if self.degradation is not None:
+                self.degradation.stt.status = SubsystemStatus.UNAVAILABLE
+                self.degradation.stt.error = str(exc)
+                self.responses.append(
+                    ("", "Voice transcription is unavailable - use text mode (--text).")
+                )
         logger.info("heard: %r", transcript)
         if not transcript:
             self.state.to_idle()
@@ -208,6 +217,9 @@ class VoiceLoop:
                 logger.exception("TTS failure; continuing")
             else:
                 logger.warning("TTS unavailable; replying silently: %s", exc)
+            if self.degradation is not None:
+                self.degradation.tts.status = SubsystemStatus.UNAVAILABLE
+                self.degradation.tts.error = str(exc)
         self.state.to_idle()
 
     # ── execution + persistence ────────────────────────────────────────────

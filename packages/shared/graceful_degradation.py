@@ -70,6 +70,9 @@ class DegradationMode:
     stt: SubsystemHealth = field(default_factory=lambda: SubsystemHealth("stt"))
     tts: SubsystemHealth = field(default_factory=lambda: SubsystemHealth("tts"))
     wake: SubsystemHealth = field(default_factory=lambda: SubsystemHealth("wake"))
+    # Ollama is not required for voice: the planner has deterministic routes.
+    # Its loss is reported as degraded, never as a reason to go silent.
+    llm: SubsystemHealth = field(default_factory=lambda: SubsystemHealth("llm"))
 
     # Thresholds
     health_check_interval: float = 30.0  # seconds between checks
@@ -81,11 +84,14 @@ class DegradationMode:
         if self.stt.status == SubsystemStatus.UNAVAILABLE:
             return InteractionMode.TEXT_ONLY
 
-        if self.tts.status == SubsystemStatus.UNAVAILABLE:
-            return InteractionMode.VOICE_BUT_DEGRADED
-
-        if self.wake.status == SubsystemStatus.UNAVAILABLE:
-            # Wake word unavailable — can still use voice if user triggers manually
+        if any(
+            sub.status == SubsystemStatus.UNAVAILABLE for sub in (self.tts, self.wake)
+        ) or self.llm.status in (
+            SubsystemStatus.UNAVAILABLE,
+            SubsystemStatus.DEGRADED,
+        ):
+            # TTS/wake/Ollama loss — voice still works manually or with text
+            # replies; deterministic planner routes cover the LLM gap.
             return InteractionMode.VOICE_BUT_DEGRADED
 
         return InteractionMode.VOICE
@@ -98,20 +104,25 @@ class DegradationMode:
     def is_degraded(self) -> bool:
         return self.mode != InteractionMode.VOICE
 
-    def check_stt(self, stt: Any) -> SubsystemHealth:
-        """Check STT health by attempting a quick transcription."""
+    def check_stt(self, stt: Any, probe: Callable[[], bool] | None = None) -> SubsystemHealth:
+        """Check STT health. `probe` verifies the local backend is importable."""
         now = time.time()
         if now - self.stt.last_check < self.health_check_interval:
             return self.stt
 
         start = time.monotonic()
         try:
-            # Try to access the model (lazy load check)
-            if hasattr(stt, "model") or hasattr(stt, "_model"):
+            if probe is not None and not probe():
+                self.stt.status = SubsystemStatus.UNAVAILABLE
+                self.stt.error = "Local STT backend is not available"
+            elif (
+                stt is None
+                or hasattr(stt, "model")
+                or hasattr(stt, "_model")
+                or hasattr(stt, "transcribe")
+            ):
                 self.stt.status = SubsystemStatus.HEALTHY
-            elif hasattr(stt, "transcribe"):
-                # Has the method — assume healthy for now
-                self.stt.status = SubsystemStatus.HEALTHY
+                self.stt.error = None
             else:
                 self.stt.status = SubsystemStatus.UNAVAILABLE
                 self.stt.error = "No transcribe method"
@@ -123,7 +134,7 @@ class DegradationMode:
         self.stt.last_check = now
         return self.stt
 
-    def check_tts(self, tts: Any) -> SubsystemHealth:
+    def check_tts(self, tts: Any, probe: Callable[[], bool] | None = None) -> SubsystemHealth:
         """Check TTS health by verifying model availability."""
         now = time.time()
         if now - self.tts.last_check < self.health_check_interval:
@@ -131,8 +142,16 @@ class DegradationMode:
 
         start = time.monotonic()
         try:
-            if hasattr(tts, "synthesize") or hasattr(tts, "synthesize_play"):
+            if probe is not None and not probe():
+                self.tts.status = SubsystemStatus.UNAVAILABLE
+                self.tts.error = "Piper voice model is not available"
+            elif (
+                tts is None
+                or hasattr(tts, "synthesize")
+                or hasattr(tts, "synthesize_play")
+            ):
                 self.tts.status = SubsystemStatus.HEALTHY
+                self.tts.error = None
             else:
                 self.tts.status = SubsystemStatus.UNAVAILABLE
                 self.tts.error = "No synthesize method"
@@ -144,7 +163,7 @@ class DegradationMode:
         self.tts.last_check = now
         return self.tts
 
-    def check_wake(self, wake: Any) -> SubsystemHealth:
+    def check_wake(self, wake: Any, probe: Callable[[], bool] | None = None) -> SubsystemHealth:
         """Check wake word detector health."""
         now = time.time()
         if now - self.wake.last_check < self.health_check_interval:
@@ -152,8 +171,16 @@ class DegradationMode:
 
         start = time.monotonic()
         try:
-            if hasattr(wake, "score_frame") or hasattr(wake, "is_activated"):
+            if probe is not None and not probe():
+                self.wake.status = SubsystemStatus.DEGRADED
+                self.wake.error = "Wake model unavailable — clap/manual trigger only"
+            elif (
+                wake is None
+                or hasattr(wake, "score_frame")
+                or hasattr(wake, "is_activated")
+            ):
                 self.wake.status = SubsystemStatus.HEALTHY
+                self.wake.error = None
             else:
                 self.wake.status = SubsystemStatus.DEGRADED
                 self.wake.error = "Clap-only mode"
@@ -165,23 +192,59 @@ class DegradationMode:
         self.wake.last_check = now
         return self.wake
 
-    def check_all(self, stt: Any = None, tts: Any = None, wake: Any = None) -> InteractionMode:
+    def check_llm(self, probe: Callable[[], bool] | None = None) -> SubsystemHealth:
+        """Check whether the local planner is reachable.
+
+        Unavailability is reported as DEGRADED, not UNAVAILABLE: the planner's
+        deterministic routes still handle common requests offline.
+        """
+        now = time.time()
+        if now - self.llm.last_check < self.health_check_interval:
+            return self.llm
+
+        start = time.monotonic()
+        try:
+            available = True if probe is None else bool(probe())
+            if available:
+                self.llm.status = SubsystemStatus.HEALTHY
+                self.llm.error = None
+            else:
+                self.llm.status = SubsystemStatus.DEGRADED
+                self.llm.error = "Ollama unreachable — deterministic routes only"
+        except Exception as exc:
+            self.llm.status = SubsystemStatus.DEGRADED
+            self.llm.error = str(exc)
+
+        self.llm.latency_ms = (time.monotonic() - start) * 1000
+        self.llm.last_check = now
+        return self.llm
+
+    def check_all(
+        self,
+        stt: Any = None,
+        tts: Any = None,
+        wake: Any = None,
+        probes: dict[str, Callable[[], bool]] | None = None,
+    ) -> InteractionMode:
         """Run health checks on all subsystems and return the resulting mode."""
-        if stt:
-            self.check_stt(stt)
-        if tts:
-            self.check_tts(tts)
-        if wake:
-            self.check_wake(wake)
+        probes = probes or {}
+        if stt or "stt" in probes:
+            self.check_stt(stt, probes.get("stt"))
+        if tts or "tts" in probes:
+            self.check_tts(tts, probes.get("tts"))
+        if wake or "wake" in probes:
+            self.check_wake(wake, probes.get("wake"))
+        self.check_llm(probes.get("llm"))
 
         mode = self.mode
         if mode != InteractionMode.VOICE:
             logger.warning(
-                "System degraded: mode=%s, stt=%s, tts=%s, wake=%s",
+                "System degraded: mode=%s, stt=%s, tts=%s, wake=%s, llm=%s",
                 mode.value,
                 self.stt.status.value,
                 self.tts.status.value,
                 self.wake.status.value,
+                self.llm.status.value,
             )
         return mode
 
@@ -203,6 +266,11 @@ class DegradationMode:
                 "status": self.wake.status.value,
                 "error": self.wake.error,
                 "latency_ms": self.wake.latency_ms,
+            },
+            "llm": {
+                "status": self.llm.status.value,
+                "error": self.llm.error,
+                "latency_ms": self.llm.latency_ms,
             },
         }
 

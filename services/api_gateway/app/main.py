@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import logging
 import os
 import time
@@ -34,9 +35,11 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from packages.shared.graceful_degradation import DegradationMode
 from packages.shared.kill_phrase import detect_kill_phrase
 from packages.shared.permission_engine import PermissionEngine, register_all_tools
 from packages.shared.second_factor import load_or_create_key, mint, pin_matches
+from packages.shared.tts import find_piper_voice
 
 from .pairing import (
     Device,
@@ -1858,6 +1861,28 @@ async def v1_system_status(device: Device = Depends(_require_device)) -> dict:
             _probe(COMPUTER_URL.rstrip("/") + "/windows"),
         )
     )
+
+    # Report the interaction mode honestly: the phone/console can switch to
+    # text input instead of sitting silent when local voice models are absent.
+    ollama_base = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+    ollama_ok, _ = await _probe(ollama_base + "/api/tags")
+    degradation = DegradationMode()
+    degradation.check_all(
+        probes={
+            "stt": lambda: importlib.util.find_spec("faster_whisper") is not None,
+            "tts": lambda: (
+                importlib.util.find_spec("piper") is not None
+                and find_piper_voice(
+                    os.getenv("TTS_MODEL", ""),
+                    [Path(os.getenv("MODELS_DIR", "models"))],
+                )
+                is not None
+            ),
+            "wake": lambda: importlib.util.find_spec("openwakeword") is not None,
+            "llm": lambda: ollama_ok,
+        }
+    )
+    summary = degradation.summary()
     return {
         "device": device.device_id,
         "registry_frozen": PermissionEngine._frozen,
@@ -1876,6 +1901,9 @@ async def v1_system_status(device: Device = Depends(_require_device)) -> dict:
         "task_runner_state": {"reachable": runner_ok, "detail": runner_detail},
         "memory_state": {"reachable": memory_ok, "detail": memory_detail},
         "computer_agent_state": {"reachable": computer_ok, "detail": computer_detail},
+        "interaction_mode": summary["mode"],
+        "text_only": degradation.is_text_only,
+        "degradation": summary,
     }
 
 

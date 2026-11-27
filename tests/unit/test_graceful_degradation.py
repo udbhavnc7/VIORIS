@@ -63,6 +63,13 @@ class TestDegradationMode:
         mode.tts.status = SubsystemStatus.HEALTHY
         assert mode.mode == InteractionMode.TEXT_ONLY
 
+    def test_llm_unavailable_is_degraded_not_silent(self):
+        """Ollama loss must never force text-only: deterministic routes work."""
+        mode = DegradationMode()
+        mode.llm.status = SubsystemStatus.DEGRADED
+        assert mode.mode == InteractionMode.VOICE_BUT_DEGRADED
+        assert not mode.is_text_only
+
 
 class TestHealthChecks:
     def test_check_stt_with_transcribe(self):
@@ -133,6 +140,34 @@ class TestHealthChecks:
         result = mode.check_all(stt=fake_stt, tts=fake_tts, wake=fake_wake)
         assert result == InteractionMode.VOICE
 
+    def test_probe_failure_marks_stt_unavailable(self):
+        mode = DegradationMode()
+        fake_stt = type("FakeSTT", (), {"transcribe": lambda self, a: ""})()
+        result = mode.check_stt(fake_stt, probe=lambda: False)
+        assert result.status == SubsystemStatus.UNAVAILABLE
+        assert mode.mode == InteractionMode.TEXT_ONLY
+
+    def test_probe_only_checks_can_run_without_objects(self):
+        """The gateway has no local audio objects, only import probes."""
+        mode = DegradationMode()
+        result = mode.check_all(
+            probes={
+                "stt": lambda: False,
+                "tts": lambda: True,
+                "wake": lambda: True,
+                "llm": lambda: True,
+            }
+        )
+        assert result == InteractionMode.TEXT_ONLY
+        assert mode.summary()["stt"]["status"] == "unavailable"
+
+    def test_llm_probe_failure_is_degraded(self):
+        mode = DegradationMode()
+        result = mode.check_llm(probe=lambda: False)
+        assert result.status == SubsystemStatus.DEGRADED
+        assert mode.mode == InteractionMode.VOICE_BUT_DEGRADED
+        assert "deterministic" in result.error
+
 
 class TestSummary:
     def test_summary_shape(self):
@@ -142,6 +177,7 @@ class TestSummary:
         assert "stt" in s
         assert "tts" in s
         assert "wake" in s
+        assert "llm" in s
         assert s["mode"] == "voice"
         assert s["stt"]["status"] == "healthy"
 
