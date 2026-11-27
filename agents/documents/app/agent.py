@@ -8,7 +8,7 @@ allow-list. Tool tiers (registered statically in the permission engine):
   - file.read          (observe)
   - file.move          (execute)
   - file.rename        (execute)
-  - file.delete        (critical — irreversible)
+  - file.delete        (critical — moves to local trash so it is undoable)
   - terminal.run       (execute)
 
 Guardrails (these are the agent's job, regardless of tier):
@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,6 +36,8 @@ from packages.shared.permission_engine import UnknownToolError
 from .allowlist import GuardrailConfig, path_is_allowed
 
 logger = logging.getLogger(__name__)
+
+TRASH_DIR_NAME = ".vioris-trash"
 
 
 class DocumentsBlockedError(Exception):
@@ -72,6 +76,8 @@ class DocumentsAgent:
             query = query.strip()
             results = []
             for match in base.rglob("*"):
+                if TRASH_DIR_NAME in match.parts:
+                    continue  # trashed files are only reachable by undo
                 if match.is_file() and query.lower() in match.name.lower():
                     results.append(str(match.relative_to(base)))
         except OSError as exc:
@@ -138,7 +144,7 @@ class DocumentsAgent:
         self._executions.append("file.rename")
         return DocsOutcome(tool="file.rename", ok=True, note="renamed", detail={"path": path, "new_name": new_name})
 
-    # ── critical (irreversible) ──────────────────────────────────────────
+    # ── critical (reversible via local trash) ────────────────────────────
     def delete(self, path: str) -> DocsOutcome:
         target = Path(path).expanduser()
         if not path_is_allowed(self.config.allowed_dirs, target):
@@ -147,8 +153,19 @@ class DocumentsAgent:
             return self._refuse("file.delete", "outside-allowlist", {"path": path})
         if not target.exists():
             return DocsOutcome(tool="file.delete", ok=False, note="no such file")
+        root = self._containing_root(target)
+        if root is None:
+            return self._refuse("file.delete", "outside-allowlist", {"path": path})
+
+        # Move to a local trash directory instead of unlinking: the action is
+        # still Critical-gated upstream, but the user gets a real undo window.
+        trash_dir = root / TRASH_DIR_NAME
+        trash_path = trash_dir / (
+            f"{int(time.time())}-{uuid.uuid4().hex[:8]}-{target.name}"
+        )
         try:
-            target.unlink()
+            trash_dir.mkdir(exist_ok=True)
+            target.rename(trash_path)
         except OSError as exc:
             return DocsOutcome(tool="file.delete", ok=False, note="delete failed", error=str(exc))
         self._executions.append("file.delete")
@@ -156,9 +173,55 @@ class DocumentsAgent:
         return DocsOutcome(
             tool="file.delete",
             ok=True,
-            note="deleted",
-            detail={"path": path, "critical_gate_required": True},
+            note="moved to trash",
+            detail={
+                "path": path,
+                "trash_path": str(trash_path),
+                "original_path": str(target),
+                "critical_gate_required": True,
+            },
         )
+
+    def restore(self, trash_path: str, original_path: str) -> DocsOutcome:
+        """Undo a delete: move a trashed file back to its original path."""
+        trashed = Path(trash_path).expanduser()
+        original = Path(original_path).expanduser()
+        if not path_is_allowed(self.config.allowed_dirs, trashed) or not path_is_allowed(
+            self.config.allowed_dirs, original
+        ):
+            return self._refuse(
+                "file.restore",
+                "outside-allowlist",
+                {"trash_path": trash_path, "original_path": original_path},
+            )
+        if TRASH_DIR_NAME not in trashed.parts:
+            return DocsOutcome(
+                tool="file.restore", ok=False, note="not a trash path", blocked="path-allowlist"
+            )
+        if not trashed.is_file():
+            return DocsOutcome(tool="file.restore", ok=False, note="trashed file not found")
+        if original.exists():
+            return DocsOutcome(
+                tool="file.restore", ok=False, note="original path already exists"
+            )
+        try:
+            original.parent.mkdir(parents=True, exist_ok=True)
+            trashed.rename(original)
+        except OSError as exc:
+            return DocsOutcome(tool="file.restore", ok=False, note="restore failed", error=str(exc))
+        self._executions.append("file.restore")
+        return DocsOutcome(
+            tool="file.restore",
+            ok=True,
+            note="restored",
+            detail={"path": str(original), "trash_path": str(trashed)},
+        )
+
+    def _containing_root(self, target: Path) -> Path | None:
+        for root in self.config.allowed_dirs:
+            if path_is_allowed((root,), target):
+                return root
+        return None
 
     # ── executable only when on the command allow-list ───────────────────
     def run(self, command: str, args: list[str] | None = None) -> DocsOutcome:

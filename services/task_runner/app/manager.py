@@ -32,6 +32,7 @@ from packages.shared.schemas import Task, TaskStatus, TaskStep
 from .approvals import ApprovalStore, action_hash
 from .engine import StepOutcome, TaskEngine
 from .events import EventHub
+from .staged_execution import StagedAction, StagedActionStore
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,10 @@ class TaskManager:
         self.reasoning = ReasoningStore(self.db_path)
         self.explainer = ExplainabilityEngine(self.reasoning)
         self.why_handler = ExplainabilityHandler(self.explainer)
+        # Critical actions are staged here after approval so the user gets a
+        # cancel window before an irreversible step fires. In-memory by design:
+        # a restart leaves the step armed but never silently executes it.
+        self.stages = StagedActionStore()
         self._reconcile_inflight()
 
     def _reconcile_inflight(self) -> None:
@@ -236,6 +241,14 @@ class TaskManager:
         If the engine pauses for approval, create the ApprovalRequest."""
         task = self.get(task_id)
 
+        # A Critical step inside its cancel window must not be fired by any
+        # other caller (UI "Run", resume, a retry). Only the stage timer may
+        # advance it, and it marks the stage EXECUTING before dispatching.
+        if self.stages.has_pending_for_task(task_id):
+            return task, StepOutcome(
+                None, ok=False, error="awaiting staged execution window"
+            )
+
         # `system.stop` is the user's kill switch. Route it to the manager so
         # it halts EVERY task, not merely the one that requested it.
         next_step = next((s for s in task.steps if s.status == TaskStatus.CREATED), None)
@@ -355,6 +368,155 @@ class TaskManager:
         )
         self.append_audit("user", "rejected", {"approval": approval_id, "step": approval.step_id}, task.task_id)
         return task
+
+    # ── staged Critical execution (reversible-by-default) ─────────────────
+    def stage_critical(
+        self,
+        task_id: str,
+        step_id: str,
+        tool: str,
+        description: str,
+        diff_card: dict,
+        execute_fn,
+        undo_fn=None,
+        execute_after_seconds: float = 30.0,
+        undo_window_seconds: float = 300.0,
+    ) -> StagedAction:
+        """Stage an already-approved Critical step with a cancel/undo window.
+
+        The execute callback still goes through the normal dispatch path, so
+        the permission registry and approval ledger are re-checked when the
+        window expires. Approval is never inferred from staging.
+        """
+        stage_id = f"stage_{uuid.uuid4().hex[:8]}"
+
+        def run_and_audit():
+            try:
+                result = execute_fn()
+            except Exception:
+                self.append_audit(
+                    "system",
+                    "stage_failed",
+                    {"stage_id": stage_id, "tool": tool},
+                    task_id,
+                )
+                raise
+            self.append_audit(
+                "system",
+                "stage_executed",
+                {"stage_id": stage_id, "tool": tool},
+                task_id,
+            )
+            return result
+
+        action = self.stages.stage(
+            tool=tool,
+            task_id=task_id,
+            step_id=step_id,
+            description=description,
+            diff_card=diff_card,
+            execute_fn=run_and_audit,
+            undo_fn=undo_fn,
+            execute_after_seconds=execute_after_seconds,
+            undo_window_seconds=undo_window_seconds,
+            stage_id=stage_id,
+        )
+        self.append_audit(
+            "system",
+            "staged",
+            {
+                "stage_id": action.stage_id,
+                "tool": tool,
+                "step": step_id,
+                "execute_after_seconds": execute_after_seconds,
+                "undo_window_seconds": undo_window_seconds,
+            },
+            task_id,
+        )
+        self.events.publish(
+            {
+                "type": "staged",
+                "stage_id": action.stage_id,
+                "task_id": task_id,
+                "step_id": step_id,
+                "tool": tool,
+                "execute_after_seconds": execute_after_seconds,
+                "undo_window_seconds": undo_window_seconds,
+            }
+        )
+        return action
+
+    def list_stages(self) -> list[dict]:
+        actions = self.stages.list_pending() + self.stages.list_undoable()
+        return [self._stage_dict(a) for a in actions]
+
+    def cancel_staged(self, stage_id: str) -> dict:
+        action = self.stages.get(stage_id)
+        if action is None:
+            raise KeyError(f"no stage {stage_id}")
+        if not self.stages.cancel(stage_id):
+            raise ValueError("stage is already executing, executed, or cancelled")
+        # Cancelling the stage must also cancel the armed step/task; otherwise
+        # a later /run could still fire what the user just stopped.
+        try:
+            self.cancel(action.task_id)
+        except (KeyError, ValueError):
+            logger.warning("staged cancel: task %s already terminal", action.task_id)
+        self.append_audit(
+            "user",
+            "stage_cancelled",
+            {"stage_id": stage_id, "tool": action.tool, "step": action.step_id},
+            action.task_id,
+        )
+        self.events.publish(
+            {
+                "type": "stage_cancelled",
+                "stage_id": stage_id,
+                "task_id": action.task_id,
+                "step_id": action.step_id,
+                "tool": action.tool,
+            }
+        )
+        return self._stage_dict(action)
+
+    def undo_staged(self, stage_id: str) -> dict:
+        action = self.stages.get(stage_id)
+        if action is None:
+            raise KeyError(f"no stage {stage_id}")
+        if not self.stages.undo(stage_id):
+            raise ValueError("stage is not undoable (not executed, expired, or no reversal handler)")
+        self.append_audit(
+            "user",
+            "undone",
+            {"stage_id": stage_id, "tool": action.tool, "step": action.step_id},
+            action.task_id,
+        )
+        self.events.publish(
+            {
+                "type": "undone",
+                "stage_id": stage_id,
+                "task_id": action.task_id,
+                "step_id": action.step_id,
+                "tool": action.tool,
+            }
+        )
+        return self._stage_dict(action)
+
+    @staticmethod
+    def _stage_dict(action: StagedAction) -> dict:
+        return {
+            "stage_id": action.stage_id,
+            "tool": action.tool,
+            "task_id": action.task_id,
+            "step_id": action.step_id,
+            "description": action.description,
+            "status": action.status.value,
+            "diff_card": action.diff_card,
+            "created_at": action.created_at,
+            "execute_after_seconds": action.execute_after_seconds,
+            "undo_window_seconds": action.undo_window_seconds,
+            "undoable": action.status.value == "executed" and action.undo_fn is not None,
+        }
 
     # ── read / helpers ────────────────────────────────────────────────────
     def get(self, task_id: str) -> Task:

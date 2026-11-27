@@ -17,6 +17,14 @@ def store():
     return StagedActionStore()
 
 
+def wait_for_status(action, status, timeout=2.0):
+    """Wait for the timer thread instead of guessing with a fixed sleep."""
+    deadline = time.monotonic() + timeout
+    while action.status != status and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return action.status == status
+
+
 class TestStage:
     def test_stage_creates_action(self, store):
         action = store.stage(
@@ -97,7 +105,7 @@ class TestAutoExecute:
         )
         executed.wait(timeout=2)
         assert executed.is_set()
-        assert action.status == StageStatus.EXECUTED
+        assert wait_for_status(action, StageStatus.EXECUTED)
 
     def test_does_not_execute_if_cancelled(self, store):
         executed = threading.Event()
@@ -141,12 +149,46 @@ class TestUndo:
             undo_window_seconds=5,
         )
         # Wait for execution
-        time.sleep(0.2)
+        assert wait_for_status(action, StageStatus.EXECUTED)
+
+        # Undo within window — the reversal handler must actually run
+        assert store.undo(action.stage_id) is True
+        assert undo_called.is_set()
+        assert action.status == StageStatus.UNDONE
+
+    def test_undo_without_handler_fails(self, store):
+        action = store.stage(
+            tool="file.delete",
+            task_id="t1",
+            step_id="s1",
+            description="Delete",
+            diff_card={},
+            execute_fn=lambda: None,
+            execute_after_seconds=0.05,
+            undo_window_seconds=5,
+        )
+        assert wait_for_status(action, StageStatus.EXECUTED)
+        assert store.undo(action.stage_id) is False
         assert action.status == StageStatus.EXECUTED
 
-        # Undo within window
-        assert store.undo(action.stage_id) is True
-        assert action.status == StageStatus.UNDONE
+    def test_failed_undo_stays_executed(self, store):
+        def broken_undo():
+            raise RuntimeError("trash already purged")
+
+        action = store.stage(
+            tool="file.delete",
+            task_id="t1",
+            step_id="s1",
+            description="Delete",
+            diff_card={},
+            execute_fn=lambda: None,
+            undo_fn=broken_undo,
+            execute_after_seconds=0.05,
+            undo_window_seconds=5,
+        )
+        assert wait_for_status(action, StageStatus.EXECUTED)
+        assert store.undo(action.stage_id) is False
+        assert action.status == StageStatus.EXECUTED
 
     def test_undo_after_window_fails(self, store):
         def on_execute():
@@ -206,11 +248,12 @@ class TestCleanup:
             description="Delete",
             diff_card={},
             execute_fn=lambda: None,
+            undo_fn=lambda: None,
             execute_after_seconds=0.05,
         )
         time.sleep(0.2)
         # Mark as undone
-        store.undo(action.stage_id)
+        assert store.undo(action.stage_id) is True
         removed = store.cleanup_expired()
         assert removed == 1
         assert store.get(action.stage_id) is None
@@ -230,8 +273,7 @@ class TestEdgeCases:
             execute_fn=bad_execute,
             execute_after_seconds=0.05,
         )
-        time.sleep(0.2)
-        assert action.status == StageStatus.CANCELLED
+        assert wait_for_status(action, StageStatus.CANCELLED)
 
     def test_get_nonexistent_returns_none(self, store):
         assert store.get("stage_nonexistent") is None

@@ -7,12 +7,16 @@ import { ApprovalCard } from "../components/ApprovalCard";
 import { EmptyState, PageHeader } from "../components/EmptyState";
 import { Icon } from "../components/Icon";
 import { RiskBadge } from "../components/Pills";
+import { StageCard } from "../components/StageCard";
 import type { RiskTier } from "../lib/api";
 
 const TIERS: RiskTier[] = ["observe", "prepare", "execute", "critical"];
 
 export function Approvals() {
-  const { approvals, events, chainOk, system } = useData();
+  const { approvals, stages, events, chainOk, system } = useData();
+  const liveStages = stages.filter(
+    (stage) => stage.status === "staged" || (stage.status === "executed" && stage.undoable),
+  );
 
   const decisions = useMemo(
     () => events.filter((event) => ["approved", "rejected"].includes(event.action)).slice(0, 10),
@@ -39,6 +43,25 @@ export function Approvals() {
 
       <div className="approvals-layout">
         <div className="approvals-main">
+          {liveStages.length > 0 ? (
+            <section className="panel">
+              <div className="section-head">
+                <div>
+                  <h2>In motion</h2>
+                  <p>
+                    Approved Critical actions wait out a cancel window before they fire, then stay
+                    reversible for a few minutes where an undo exists.
+                  </p>
+                </div>
+              </div>
+              <div className="approval-stack">
+                {liveStages.map((stage) => (
+                  <StageCard key={stage.stage_id} stage={stage} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
           {approvals.length === 0 ? (
             <EmptyState
               icon="shield"

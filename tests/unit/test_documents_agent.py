@@ -5,6 +5,8 @@ With a temp dir granted, reads/search/moves work; delete is Critical; anything
 outside the granted roots or the command allow-list is REFUSED, never attempted.
 """
 
+from pathlib import Path
+
 import pytest
 
 from agents.documents.app.agent import DocumentsAgent, PermissionBlockedError
@@ -116,6 +118,42 @@ class TestCriticalDelete:
         assert out.ok
         assert out.detail["critical_gate_required"] is True
         assert not (tmp_path / "del.txt").exists()
+        # Reversible-by-default: the file is in local trash, not unlinked.
+        assert (tmp_path / ".vioris-trash").is_dir()
+        assert Path(out.detail["trash_path"]).exists()
+
+    def test_restore_brings_the_file_back(self, tmp_path):
+        (tmp_path / "del.txt").write_text("hello")
+        agent = make_agent(tmp_path)
+        out = agent.delete(str(tmp_path / "del.txt"))
+
+        restored = agent.restore(out.detail["trash_path"], out.detail["original_path"])
+
+        assert restored.ok
+        assert (tmp_path / "del.txt").read_text() == "hello"
+        assert not Path(out.detail["trash_path"]).exists()
+
+    def test_restore_refuses_to_overwrite(self, tmp_path):
+        (tmp_path / "del.txt").write_text("old")
+        agent = make_agent(tmp_path)
+        out = agent.delete(str(tmp_path / "del.txt"))
+        (tmp_path / "del.txt").write_text("new")
+
+        restored = agent.restore(out.detail["trash_path"], out.detail["original_path"])
+
+        assert not restored.ok
+        assert "already exists" in restored.note
+        assert (tmp_path / "del.txt").read_text() == "new"
+
+    def test_trashed_files_are_hidden_from_search(self, tmp_path):
+        (tmp_path / "del.txt").write_text("x")
+        agent = make_agent(tmp_path)
+        agent.delete(str(tmp_path / "del.txt"))
+
+        found = agent.search_files("del")
+
+        assert found.ok
+        assert found.detail["count"] == 0
 
     def test_delete_registered_as_critical(self):
         reg = PermissionEngine.classify("file.delete")

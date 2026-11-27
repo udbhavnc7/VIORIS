@@ -29,6 +29,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Callable
 
@@ -39,6 +40,7 @@ class StageStatus(str, Enum):
     """Lifecycle of a staged action."""
 
     STAGED = "staged"  # waiting in the undo window
+    EXECUTING = "executing"  # the cancel window closed; the action is firing
     EXECUTED = "executed"  # undo window expired, action fired
     CANCELLED = "cancelled"  # user cancelled during undo window
     UNDONE = "undone"  # user triggered undo after execution
@@ -61,8 +63,10 @@ class StagedAction:
     diff_card: dict[str, Any] = field(default_factory=dict)
     status: StageStatus = StageStatus.STAGED
     staged_at: float = field(default_factory=time.monotonic)
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     undo_window_seconds: float = 300.0  # 5 minutes to undo after execution
     execute_after_seconds: float = 30.0  # 30 seconds before auto-executing
+    undo_fn: Callable[[], Any] | None = field(default=None, repr=False)
 
 
 class UndoWindowExpired(Exception):
@@ -93,6 +97,7 @@ class StagedActionStore:
         undo_fn: Callable[[], Any] | None = None,
         execute_after_seconds: float = 30.0,
         undo_window_seconds: float = 300.0,
+        stage_id: str | None = None,
     ) -> StagedAction:
         """Stage a Critical action for execution.
 
@@ -110,11 +115,14 @@ class StagedActionStore:
             undo_fn: Callable that reverses the action (optional).
             execute_after_seconds: Seconds before auto-execution (default 30).
             undo_window_seconds: Seconds after execution to allow undo (default 300).
+            stage_id: Optional pre-generated id (lets the caller reference the
+                stage before the timer can fire).
 
         Returns:
             The StagedAction with its stage_id (for cancel/undo operations).
         """
         action = StagedAction(
+            stage_id=stage_id or f"stage_{uuid.uuid4().hex[:8]}",
             tool=tool,
             task_id=task_id,
             step_id=step_id,
@@ -122,6 +130,7 @@ class StagedActionStore:
             diff_card=diff_card,
             execute_after_seconds=execute_after_seconds,
             undo_window_seconds=undo_window_seconds,
+            undo_fn=undo_fn,
         )
 
         with self._lock:
@@ -171,13 +180,17 @@ class StagedActionStore:
     def undo(self, stage_id: str) -> bool:
         """Undo an executed action within the undo window.
 
-        Returns True if undone, False if undo window expired or not found.
+        Calls the action's reversal handler. Returns False when the action was
+        not executed, the window expired, or no reversal handler exists. If the
+        handler fails, the action stays EXECUTED so the user can retry.
         """
         with self._lock:
             action = self._actions.get(stage_id)
             if action is None:
                 return False
             if action.status != StageStatus.EXECUTED:
+                return False
+            if action.undo_fn is None:
                 return False
 
             # Check if undo window has actually expired (time-based check)
@@ -188,19 +201,34 @@ class StagedActionStore:
             if elapsed > undo_deadline:
                 return False
 
-            # Cancel the undo timer if still active
+        # Run the reversal outside the lock: it may do network/file I/O.
+        try:
+            action.undo_fn()
+        except Exception:
+            logger.exception("Staged action %s undo failed", stage_id)
+            return False
+
+        with self._lock:
             undo_timer = self._undo_timers.pop(stage_id, None)
             if undo_timer is not None:
                 undo_timer.cancel()
-
             action.status = StageStatus.UNDONE
-            logger.info("Staged action %s undone", stage_id)
-            return True
+            action.undo_fn = None
+        logger.info("Staged action %s undone", stage_id)
+        return True
 
     def get(self, stage_id: str) -> StagedAction | None:
         """Get a staged action by ID."""
         with self._lock:
             return self._actions.get(stage_id)
+
+    def has_pending_for_task(self, task_id: str) -> bool:
+        """True while a stage for this task is still inside its cancel window."""
+        with self._lock:
+            return any(
+                a.task_id == task_id and a.status == StageStatus.STAGED
+                for a in self._actions.values()
+            )
 
     def list_pending(self) -> list[StagedAction]:
         """List all staged actions (not yet executed or cancelled)."""
@@ -238,9 +266,13 @@ class StagedActionStore:
             action = self._actions.get(stage_id)
             if action is None or action.status != StageStatus.STAGED:
                 return  # already cancelled
+            # Mark EXECUTING before dispatch: run_next_step refuses to advance a
+            # task whose stage is still STAGED, and the timer is the only caller
+            # allowed past that guard.
+            action.status = StageStatus.EXECUTING
 
         try:
-            result = execute_fn()
+            execute_fn()
             with self._lock:
                 action.status = StageStatus.EXECUTED
             logger.info("Staged action %s executed", stage_id)
@@ -257,9 +289,6 @@ class StagedActionStore:
                     self._undo_timers[stage_id] = undo_timer
                 undo_timer.start()
 
-                # Store the undo function so it can be called
-                action._undo_fn = undo_fn  # type: ignore[attr-defined]
-
         except Exception as exc:
             logger.error("Staged action %s execution failed: %s", stage_id, exc)
             with self._lock:
@@ -271,6 +300,5 @@ class StagedActionStore:
             action = self._actions.get(stage_id)
             if action is not None and action.status == StageStatus.EXECUTED:
                 # Remove the undo function — no longer reversible
-                if hasattr(action, "_undo_fn"):
-                    delattr(action, "_undo_fn")
+                action.undo_fn = None
                 logger.info("Staged action %s undo window expired — permanent", stage_id)

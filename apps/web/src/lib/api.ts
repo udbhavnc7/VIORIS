@@ -79,6 +79,20 @@ export interface Approval {
   risk_level?: RiskTier;
 }
 
+export interface Stage {
+  stage_id: string;
+  tool: string;
+  task_id: string;
+  step_id: string;
+  description: string;
+  status: "staged" | "executed" | "cancelled" | "undone";
+  diff_card: Record<string, unknown>;
+  created_at: string;
+  execute_after_seconds: number;
+  undo_window_seconds: number;
+  undoable: boolean;
+}
+
 export interface AuditEvent {
   event_id?: string;
   task_id?: string | null;
@@ -376,6 +390,12 @@ export const api = {
     }),
   reject: (id: string) =>
     request<Record<string, unknown>>(`/v1/approvals/${id}/reject`, { method: "POST" }),
+  stages: async () =>
+    (await request<{ stages: Stage[] }>("/v1/stages")).stages ?? [],
+  cancelStage: (id: string) =>
+    request<Record<string, unknown>>(`/v1/stages/${id}/cancel`, { method: "POST" }),
+  undoStage: (id: string) =>
+    request<Record<string, unknown>>(`/v1/stages/${id}/undo`, { method: "POST" }),
   stopEverything: () => request<Record<string, unknown>>("/v1/stop", { method: "POST" }),
 
   activity: () =>

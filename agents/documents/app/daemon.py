@@ -57,6 +57,11 @@ class RenameRequest(BaseModel):
     new_name: str
 
 
+class RestoreRequest(BaseModel):
+    trash_path: str
+    original_path: str
+
+
 class TerminalRequest(BaseModel):
     command: str
     args: list[str] = []
@@ -101,6 +106,11 @@ def rename(req: RenameRequest) -> dict:
 @app.post("/delete")
 def delete(req: PathRequest) -> dict:
     return _outcome(get_agent().delete(req.path))
+
+
+@app.post("/restore")
+def restore(req: RestoreRequest) -> dict:
+    return _outcome(get_agent().restore(req.trash_path, req.original_path))
 
 
 @app.post("/terminal")

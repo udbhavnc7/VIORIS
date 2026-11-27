@@ -371,6 +371,28 @@ def _call_documents(tool: str, args: dict, base: str) -> dict:
     return {"ok": True, "tool": tool, "latency_ms": latency_ms, "result": body}
 
 
+def restore_file(
+    trash_path: str, original_path: str, documents_url: str | None = None
+) -> dict:
+    """Undo a trashed file.delete by asking the documents agent to restore it.
+
+    This is the reversal handler for an already-approved Critical action; it is
+    still audited by the task runner (the caller records the undo event).
+    """
+    base = (documents_url or os.getenv("VIORUS_DOCUMENTS_URL", DOCUMENTS_URL)).rstrip("/")
+    try:
+        with httpx.Client(timeout=30, trust_env=False) as client:
+            resp = client.post(
+                f"{base}/restore",
+                json={"trash_path": trash_path, "original_path": original_path},
+            )
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"documents agent unreachable for file.restore: {exc}") from exc
+    body = _parse(resp)
+    _raise_for_failure("file.restore", resp.status_code, body)
+    return body
+
+
 def _call_smart_home(step, task, args: dict, base: str) -> dict:
     """Call the smart-home connector and return a verified result dict.
 
