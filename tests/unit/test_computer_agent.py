@@ -117,6 +117,15 @@ class TestReadScreenText:
         assert not out.ok
         assert "no tesseract" in out.error
 
+    def test_observed_screen_text_is_quarantined_as_data(self, tmp_path):
+        # The shared fake OCR yields "hello"; the boundary must still be present
+        # so anything else on screen can never be read as a user instruction.
+        out = make_agent(tmp_path).read_screen_text()
+        assert "[UNTRUSTED DATA" in out.detail["text"]
+        assert "<untrusted_data>" in out.detail["text"]
+        assert out.detail["untrusted"]["source"] == "screen"
+        assert out.detail["untrusted"]["location"] == "live screen"
+
 
 class TestLockWorkstation:
     def test_lock_success_through_injected_backend(self, tmp_path):

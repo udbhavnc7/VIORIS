@@ -91,11 +91,23 @@ class BrowserAgent:
         wall = self._check_wall(snap)
         if wall:
             return self._surfaced("browser.read_page", wall, snap.url)
+        # Page content is untrusted observed data, never instructions from the
+        # user. Keep it as-is inside a provenance envelope and flag suspected
+        # injection payloads for the user — but never parse or act on them.
+        from packages.shared.untrusted_content import UntrustedContent
+
+        observed = UntrustedContent(
+            source="browser", location=snap.url, text=snap.text.strip()
+        )
         return BrowserOutcome(
             tool="browser.read_page",
             ok=True,
             note="read page",
-            detail={"url": snap.url, "text": snap.text.strip()},
+            detail={
+                "url": snap.url,
+                "text": observed.as_data(),
+                "untrusted": observed.to_dict(),
+            },
         )
 
     # ── form fill (prepare) ──────────────────────────────────────────────

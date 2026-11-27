@@ -393,6 +393,18 @@ def disconnect(account: str) -> dict:
 
 
 def _item_dict(item: Any) -> dict:
+    from packages.shared.untrusted_content import UntrustedContent
+
+    # Snippets/asks come from an external sender: tag them as observed data so
+    # a digest composer cannot mistake injected text for a user instruction.
+    observed = UntrustedContent(
+        source="email",
+        location=getattr(item, "sender", ""),
+        text=" ".join(
+            str(getattr(item, field, "") or "")
+            for field in ("subject", "snippet")
+        ),
+    )
     return {
         "message_id": item.message_id,
         "sender": item.sender,
@@ -402,4 +414,5 @@ def _item_dict(item: Any) -> dict:
         "asks": item.asks,
         "dates": item.dates,
         "received_at": item.received_at.isoformat() if item.received_at else None,
+        "untrusted": observed.to_dict(),
     }

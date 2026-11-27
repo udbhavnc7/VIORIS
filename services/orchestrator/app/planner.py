@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from packages.shared.intent_classifier import classify_intent, IntentType
 from packages.shared.permission_engine import PermissionEngine, UnknownToolError
 from packages.shared.schemas import TaskStep
+from packages.shared.untrusted_content import is_quarantined_text
 
 from .llm_client import default_llm_backend, PlannerBackendError
 from .tool_schema import build_tool_schema
@@ -69,7 +70,17 @@ class Planner:
         workflows (briefing, messaging, reservations) also route here so the
         product works without a local model installed. Complex or ambiguous
         requests go through the full LLM planning pipeline.
+
+        A quarantined ``as_data()`` envelope is NEVER accepted as a transcript:
+        observed content is data and must not be planned as a user command,
+        even if a caller accidentally feeds it back here.
         """
+        if is_quarantined_text(transcript):
+            logger.warning("refusing to plan quarantined observed content as a user request")
+            return Plan(
+                request=transcript,
+                error="Observed content cannot be planned as a user request.",
+            )
         if self.deterministic:
             direct = self._workflow_route(transcript)
             if direct is not None:

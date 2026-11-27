@@ -63,6 +63,7 @@ What is deliberately simulated:
 - **The frontend never executes.** It asks the authenticated gateway for work; the gateway, task runner, and permission engine decide.
 - **Every action is auditable and explainable.** Audit events are append-only and hash-chained. Each plan step stores the reason it was chosen and the alternatives considered, so the Activity screen can answer "why did you do that?" from the same durable record instead of improvising. Older tasks without a stored reason are labelled *derived from the plan*.
 - **The kill phrase never asks the model.** "Stop everything" is plain string matching at the voice/gateway/task-runner boundary, executed before the planner. It stops every non-terminal task, purges pending approvals, and writes a `stopped` audit event even when nothing was running.
+- **Observed content is never a command.** Pages, emails, and OCR'd screen text are wrapped as provenance-tagged data with injection-pattern flags (Unicode-normalised, so homoglyph payloads are caught). The planner refuses a quarantined envelope as a user transcript, audit metadata never carries raw injected text, and no registered tool's risk tier can be changed by what Vioris merely reads.
 - **The Activity screen reports chain integrity** rather than hiding it.
 - **Local-first, no paid APIs by default.** Ollama and the local services are enough to run the system; external models and apps are opt-in.
 - **Secrets stay out of the model.** Tokens are never logged, never placed in prompts, and never handed to the planner.

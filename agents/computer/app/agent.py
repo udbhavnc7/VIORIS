@@ -212,11 +212,18 @@ class ComputerAgent:
             )
         ok = bool(text and text.strip())
         self._executions.append("computer.read_screen_text")
+        # OCR'd screen text is observed data, not a user command. Anything on
+        # screen (another app, a malicious page) can contain instructions.
+        from packages.shared.untrusted_content import UntrustedContent
+
+        observed = UntrustedContent(
+            source="screen", location="live screen", text=(text or "").strip()
+        )
         return ActionOutcome(
             tool="computer.read_screen_text",
             ok=ok,
             note="read screen" if ok else "no readable text",
-            detail={"text": (text or "").strip()},
+            detail={"text": observed.as_data(), "untrusted": observed.to_dict()},
             verified=ok,
             verified_note="non-empty text extracted" if ok else "OCR returned empty output",
         )

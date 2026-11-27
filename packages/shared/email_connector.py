@@ -24,6 +24,21 @@ class EmailMessage:
     date: str = ""
     labels: list[str] = field(default_factory=list)
 
+    def as_untrusted(self):
+        """Return the message body as provenance-tagged observed data.
+
+        Email body/subject come from an external sender and may contain
+        instruction-shaped text. Call this (not raw ``body``) whenever the
+        content is handed to the planner or a spoken digest.
+        """
+        from packages.shared.untrusted_content import UntrustedContent
+
+        return UntrustedContent(
+            source="email",
+            location=self.from_addr,
+            text=f"Subject: {self.subject}\n{self.body}".strip(),
+        )
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -37,6 +52,9 @@ class EmailMessage:
             "has_attachments": self.has_attachments,
             "date": self.date,
             "labels": self.labels,
+            # Additive provenance only; body/snippet stay unchanged for
+            # backwards-compatible display and reply flows.
+            "untrusted": self.as_untrusted().to_dict(),
         }
 
 
