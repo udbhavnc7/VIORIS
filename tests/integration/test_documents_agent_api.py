@@ -67,6 +67,24 @@ def test_delete_is_critical_and_gated(client):
     assert r.json()["detail"]["critical_gate_required"] is True
 
 
+def test_delete_is_reversible_through_restore(client):
+    deleted = client.post("/delete", json={"path": str(client._root / "notes.txt")}).json()
+    detail = deleted["detail"]
+    assert detail["trash_path"]
+    assert not (client._root / "notes.txt").exists()
+
+    restored = client.post(
+        "/restore",
+        json={
+            "trash_path": detail["trash_path"],
+            "original_path": detail["original_path"],
+        },
+    ).json()
+
+    assert restored["ok"] is True
+    assert (client._root / "notes.txt").read_text() == "vioris notes"
+
+
 def test_terminal_refuses_non_allowlisted_command(client):
     r = client.post("/terminal", json={"command": "git", "args": ["status"]})
     assert r.status_code == 200

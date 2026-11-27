@@ -1377,6 +1377,18 @@ async def v1_approve(
     approved = await _proxy(
         "POST", f"/approvals/{approval_id}/approve", device, headers=headers
     )
+    # A Critical action is staged with a cancel window. Do NOT advance the
+    # task here: that would fire the step immediately and defeat the window.
+    if approved.get("staged"):
+        return {
+            "device": device.device_id,
+            "approval": approved,
+            "result": approved,
+            "staged": True,
+            "stage_id": approved.get("stage_id"),
+            "execute_after_seconds": approved.get("execute_after_seconds"),
+            "undo_window_seconds": approved.get("undo_window_seconds"),
+        }
     task_id = approved.get("task_id")
     if not task_id:
         return {"device": device.device_id, "approval": approved, "result": approved}
@@ -1398,6 +1410,28 @@ async def v1_reject(approval_id: str, device: Device = Depends(_require_device))
     }
 
 
+@app.get("/v1/stages")
+async def v1_stages(device: Device = Depends(_require_device)) -> dict:
+    """Pending Critical stages and actions still inside their undo window."""
+    return {"device": device.device_id, "stages": await _proxy("GET", "/stages", device)}
+
+
+@app.post("/v1/stages/{stage_id}/cancel")
+async def v1_cancel_stage(stage_id: str, device: Device = Depends(_require_device)) -> dict:
+    return {
+        "device": device.device_id,
+        "stage": await _proxy("POST", f"/stages/{stage_id}/cancel", device),
+    }
+
+
+@app.post("/v1/stages/{stage_id}/undo")
+async def v1_undo_stage(stage_id: str, device: Device = Depends(_require_device)) -> dict:
+    return {
+        "device": device.device_id,
+        "stage": await _proxy("POST", f"/stages/{stage_id}/undo", device),
+    }
+
+
 async def _advance_task(device: Device, task_id: str, max_steps: int = 16) -> dict:
     """Run steps until the task gates, finishes, or stops being runnable.
 
@@ -1407,6 +1441,8 @@ async def _advance_task(device: Device, task_id: str, max_steps: int = 16) -> di
     last: dict = {"task": None}
     for _ in range(max_steps):
         last = await _proxy("POST", f"/tasks/{task_id}/run", device)
+        if last.get("staged"):
+            break  # a Critical step is inside its cancel window; do not advance
         status = (last.get("task") or {}).get("status")
         if status not in ("running", "created"):
             break

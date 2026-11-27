@@ -16,6 +16,7 @@ import {
   type AuditEvent,
   type ConnectionsResponse,
   type GatewayHealth,
+  type Stage,
   type SystemStatus,
   type Task,
 } from "../lib/api";
@@ -29,6 +30,7 @@ interface Connected {
 interface DataState {
   tasks: Task[];
   approvals: Approval[];
+  stages: Stage[];
   events: AuditEvent[];
   chainOk: boolean | null;
   health: GatewayHealth | null;
@@ -55,6 +57,7 @@ export function DataProvider({
 }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [stages, setStages] = useState<Stage[]>([]);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [chainOk, setChainOk] = useState<boolean | null>(null);
   const [health, setHealth] = useState<GatewayHealth | null>(null);
@@ -69,13 +72,15 @@ export function DataProvider({
 
   const refreshCore = useCallback(async () => {
     try {
-      const [nextTasks, nextApprovals, activity] = await Promise.all([
+      const [nextTasks, nextApprovals, nextStages, activity] = await Promise.all([
         api.tasks(),
         api.approvals(),
+        api.stages(),
         api.activity(),
       ]);
       setTasks(nextTasks);
       setApprovals(nextApprovals);
+      setStages(nextStages);
       setEvents(activity.events ?? []);
       setChainOk(activity.chain_ok !== false);
       setLastSync(Date.now());
@@ -153,6 +158,7 @@ export function DataProvider({
     () => ({
       tasks,
       approvals,
+      stages,
       events,
       chainOk,
       health,
@@ -170,6 +176,7 @@ export function DataProvider({
     [
       tasks,
       approvals,
+      stages,
       events,
       chainOk,
       health,

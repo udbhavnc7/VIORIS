@@ -11,6 +11,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -24,7 +25,7 @@ from packages.shared.permission_engine import (
     UnknownToolError,
     register_all_tools,
 )
-from packages.shared.schemas import RiskTier, TaskStep
+from packages.shared.schemas import RiskTier, TaskStatus, TaskStep
 from packages.shared.second_factor import load_or_create_key
 from packages.shared.second_factor import verify as verify_second_factor
 
@@ -197,14 +198,16 @@ def run_task(task_id: str) -> dict:
     task = dispatched["task"]
     outcome = dispatched.get("outcome")
     step = outcome.step if outcome is not None else None
+    error = dispatched.get("error") or (outcome.error if outcome else None)
     return {
         "queued": dispatched["queued"],
         "task": _task_dict(task),
+        "staged": error == "awaiting staged execution window",
         "step": {
             "step_id": step.step_id if step else None,
             "tool": step.tool if step else None,
             "ok": bool(outcome and outcome.ok),
-            "error": dispatched.get("error") or (outcome.error if outcome else None),
+            "error": error,
         },
     }
 
@@ -274,6 +277,82 @@ def kill_phrase(req: KillPhraseRequest) -> dict:
 
 
 CRITICAL_COOLDOWN_SECONDS = 5
+MAX_DRAIN_STEPS = 64
+
+
+def _critical_stage_seconds() -> float:
+    try:
+        return max(0.0, float(os.getenv("VIORIS_CRITICAL_STAGE_SECONDS", "30")))
+    except ValueError:
+        return 30.0
+
+
+def _critical_undo_seconds() -> float:
+    try:
+        return max(0.0, float(os.getenv("VIORIS_CRITICAL_UNDO_SECONDS", "300")))
+    except ValueError:
+        return 300.0
+
+
+def _progress_marker(task) -> tuple:
+    return (task.status.value, tuple(s.status.value for s in task.steps))
+
+
+def _run_staged_step(task_id: str) -> dict:
+    """Fire an approved step, then keep draining runnable steps.
+
+    Inline dispatch runs exactly one step; without draining, a multi-step task
+    would silently stall after its staged Critical step. The loop stops at the
+    next approval gate, a terminal task, or when a dispatch makes no progress.
+    """
+    mgr = get_manager()
+    dispatched = dispatch_step(task_id)
+    if dispatched.get("queued"):
+        return dispatched
+
+    marker = _progress_marker(mgr.get(task_id))
+    for _ in range(MAX_DRAIN_STEPS):
+        task = mgr.get(task_id)
+        if task.status.value not in ("created", "running"):
+            break
+        if not any(s.status == TaskStatus.CREATED for s in task.steps):
+            break
+        current = _progress_marker(task)
+        if current == marker:
+            break
+        marker = current
+        dispatched = dispatch_step(task_id)
+        if dispatched.get("queued"):
+            break
+    return dispatched
+
+
+def _undo_fn_for(mgr, task_id: str, step_id: str, tool: str):
+    """Return a real reversal handler for tools that support undo.
+
+    Only file.delete has a genuine reversal today (documents agent moves the
+    file to local trash). Other Critical tools still get the cancel window but
+    honestly report that no undo handler exists.
+    """
+    if tool != "file.delete":
+        return None
+
+    def undo() -> None:
+        task = mgr.get(task_id)
+        step = next((s for s in task.steps if s.step_id == step_id), None)
+        if step is None:
+            raise RuntimeError("step not found for undo")
+        body = (step.result or {}).get("result") or {}
+        detail = body.get("detail") or {}
+        trash_path = detail.get("trash_path")
+        original_path = detail.get("original_path")
+        if not trash_path or not original_path:
+            raise RuntimeError("delete did not return a trash handle")
+        from .executor import restore_file
+
+        restore_file(trash_path, original_path)
+
+    return undo
 
 
 @app.post("/approvals/{approval_id}/approve")
@@ -312,10 +391,39 @@ def approve_approval(
         task = mgr.approve(approval.task_id, approval_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    # Auto-run the armed step: "approve from your phone while the laptop is
-    # out of sight" must actually FIRE the step. The step was re-armed from
-    # WAITING_APPROVAL to CREATED by approve(); dispatch re-checks the ledger
-    # in this process (inline) or in the worker (Celery mode).
+
+    # Critical actions are staged instead of fired immediately: the user gets a
+    # real cancel window, and a genuine reversal handler where one exists. The
+    # delayed fire still goes through dispatch_step, so permission and the
+    # approval ledger are re-checked at execution time — staging never approves.
+    if tier == RiskTier.CRITICAL:
+        stage = mgr.stage_critical(
+            task.task_id,
+            approval.step_id,
+            approval.tool,
+            description=f"{approval.tool} approved; executing after cancel window",
+            diff_card=approval.diff_card,
+            execute_fn=lambda: _run_staged_step(task.task_id),
+            undo_fn=_undo_fn_for(mgr, task.task_id, approval.step_id, approval.tool),
+            execute_after_seconds=_critical_stage_seconds(),
+            undo_window_seconds=_critical_undo_seconds(),
+        )
+        return {
+            "approved": approval_id,
+            "task_id": task.task_id,
+            "status": task.status.value,
+            "queued": False,
+            "staged": True,
+            "stage_id": stage.stage_id,
+            "execute_after_seconds": stage.execute_after_seconds,
+            "undo_window_seconds": stage.undo_window_seconds,
+            "diff_card": approval.diff_card,
+        }
+
+    # Execute-tier: "approve from your phone while the laptop is out of sight"
+    # must actually FIRE the step. The step was re-armed from WAITING_APPROVAL
+    # to CREATED by approve(); dispatch re-checks the ledger in this process
+    # (inline) or in the worker (Celery mode).
     dispatched = dispatch_step(task.task_id)
     task = dispatched["task"]
     return {
@@ -335,6 +443,32 @@ def reject_approval(approval_id: str) -> dict:
         raise HTTPException(status_code=404, detail="approval not found")
     task = mgr.reject(approval.task_id, approval_id)
     return {"rejected": approval_id, "task_id": task.task_id, "status": task.status.value}
+
+
+@app.get("/stages")
+def list_stages() -> list[dict]:
+    """Pending Critical stages and actions still inside their undo window."""
+    return get_manager().list_stages()
+
+
+@app.post("/stages/{stage_id}/cancel")
+def cancel_stage(stage_id: str) -> dict:
+    try:
+        return get_manager().cancel_staged(stage_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/stages/{stage_id}/undo")
+def undo_stage(stage_id: str) -> dict:
+    try:
+        return get_manager().undo_staged(stage_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.websocket("/ws/events")
