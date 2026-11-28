@@ -1,0 +1,549 @@
+@media (max-width: 1180px) {
+  .desktop-nav > a,
+  .nav-more > button {
+    padding-inline: 11px;
+    font-size: 9px;
+  }
+
+  .brand__name {
+    display: none;
+  }
+
+  .about-grid,
+  .contact-grid {
+    gap: 48px;
+  }
+
+  .achievements-grid,
+  .repo-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .github-section__grid {
+    grid-template-columns: 0.8fr 1.2fr;
+    gap: 38px;
+  }
+
+  .contribution-widget {
+    padding: 22px;
+  }
+}
+
+@media (max-width: 1020px) {
+  .desktop-nav {
+    display: none;
+  }
+
+  .site-header__inner {
+    grid-template-columns: 1fr auto;
+  }
+
+  .site-header__actions {
+    justify-content: flex-end;
+  }
+
+  .brand__name {
+    display: flex;
+  }
+
+  .menu-toggle {
+    display: grid;
+  }
+
+  .project-card {
+    gap: 36px;
+  }
+
+  .project-card__content h3 {
+    font-size: 36px;
+  }
+
+  .about-grid,
+  .about-hero__grid,
+  .contact-grid,
+  .github-section__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .about-grid {
+    gap: 54px;
+  }
+
+  .about-visual {
+    width: min(100%, 560px);
+    margin-inline: auto;
+  }
+
+  .about-hero__content {
+    max-width: 680px;
+  }
+
+  .about-hero__visual {
+    margin-top: 10px;
+  }
+
+  .about-stack-wrap {
+    height: 540px;
+  }
+
+  .github-section__copy {
+    max-width: 650px;
+  }
+
+  .github-stats {
+    max-width: 560px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .github-section__widget {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .contact-copy h2 {
+    max-width: 740px;
+  }
+}
+
+@media (max-width: 860px) {
+  .project-card,
+  .project-card--reverse {
+    grid-template-columns: 1fr;
+    gap: 30px;
+  }
+
+  .project-card--reverse .project-card__visual-link,
+  .project-card--reverse .project-card__content {
+    order: initial;
+  }
+
+  .project-card__content {
+    max-width: 620px;
+  }
+
+  .project-list {
+    gap: 76px;
+  }
+
+  .journey-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .projects-index__grid {
+    gap: 20px;
+  }
+
+  .site-footer__main {
+    grid-template-columns: 1fr;
+    gap: 46px;
+  }
+}
+
+@media (max-width: 760px) {
+  :root {
+    --gutter: 22px;
+    --header-height: 82px;
+  }
+
+  .section {
+    padding-block: 84px;
+  }
+
+  .site-header {
+    padding: 12px 16px 0;
+  }
+
+  .brand__name {
+    display: none;
+  }
+
+  .hire-button {
+    min-width: auto;
+    padding-inline: 16px;
+    font-size: 9px;
+  }
+
+  .hero {
+    min-height: auto;
+    padding-top: 130px;
+    padding-bottom: 60px;
+  }
+
+  .hero__grid {
+    grid-template-columns: 1fr;
+    gap: 28px;
+  }
+
+  .hero__content {
+    order: 1;
+  }
+
+  .hero__visual {
+    order: 2;
+    margin-top: 6px;
+  }
+
+  .hero h1 {
+    font-size: clamp(58px, 15vw, 92px);
+  }
+
+  .hero__lead {
+    font-size: 14px;
+  }
+
+  .orbital-portrait {
+    max-width: 470px;
+    margin-inline: auto;
+  }
+
+  .about-stack-wrap {
+    height: 500px;
+  }
+
+  .about-stack {
+    width: min(82%, 350px);
+    height: 245px;
+  }
+
+  .skills-grid,
+  .projects-index__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .achievements-grid,
+  .repo-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .achievement-card,
+  .repo-card {
+    padding: 20px;
+  }
+
+  .certification-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .contact-form-wrap {
+    padding: 22px;
+  }
+
+  .contact-form__row {
+    grid-template-columns: 1fr;
+  }
+
+  .site-footer__links {
+    gap: 18px;
+  }
+
+  .page-hero {
+    padding-top: calc(var(--header-height) + 48px);
+    padding-bottom: 62px;
+  }
+
+  .page-hero .back-link {
+    margin-bottom: 38px;
+  }
+
+  .page-hero h1 {
+    font-size: clamp(56px, 13vw, 92px);
+  }
+
+  .about-hero {
+    padding-top: calc(var(--header-height) + 44px);
+    padding-bottom: 70px;
+  }
+
+  .about-hero__grid {
+    gap: 20px;
+  }
+
+  .about-hero__content h1 {
+    font-size: clamp(56px, 12vw, 84px);
+  }
+
+  .about-experience__item {
+    grid-template-columns: 60px 1fr;
+    gap: 18px;
+  }
+
+  .about-experience__marker span {
+    width: 40px;
+    height: 40px;
+  }
+
+  .github-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .contribution-3d__header {
+    top: 20px;
+    right: 18px;
+    left: 18px;
+  }
+
+  .contribution-3d__title h2 {
+    max-width: 240px;
+    font-size: 24px;
+  }
+
+  .contribution-3d__close {
+    width: 40px;
+    height: 40px;
+  }
+
+  .contribution-3d__hint {
+    right: 18px;
+    bottom: 20px;
+    left: 18px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .about-cta {
+    padding-block: 76px;
+  }
+}
+
+@media (max-width: 520px) {
+  :root {
+    --gutter: 18px;
+  }
+
+  .section {
+    padding-block: 70px;
+  }
+
+  .hero {
+    padding-top: 118px;
+  }
+
+  .hero h1 {
+    font-size: clamp(51px, 15.5vw, 78px);
+  }
+
+  .hero__role {
+    font-size: 10px;
+  }
+
+  .hero__actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .hero__actions .button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .social-row {
+    gap: 9px;
+  }
+
+  .social-row a {
+    width: 38px;
+    height: 38px;
+  }
+
+  .scroll-cue {
+    display: none;
+  }
+
+  .orbital-portrait {
+    aspect-ratio: 1 / 1.05;
+  }
+
+  .portrait-card {
+    width: 51%;
+    height: 57%;
+  }
+
+  .portrait-card__monogram span {
+    font-size: clamp(56px, 16vw, 88px);
+  }
+
+  .about-stack-wrap {
+    height: 455px;
+  }
+
+  .about-stack {
+    width: 88%;
+    height: 226px;
+  }
+
+  .about-stack__card {
+    padding: 24px;
+  }
+
+  .about-stats {
+    gap: 10px;
+  }
+
+  .about-stats strong {
+    font-size: 31px;
+  }
+
+  .about-stats span {
+    font-size: 7px;
+  }
+
+  .tech-marks {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .trust-card {
+    right: -4px;
+    bottom: 24px;
+    width: 86%;
+  }
+
+  .project-visual {
+    aspect-ratio: 4 / 3;
+    border-radius: 18px;
+  }
+
+  .project-card__visual-link {
+    border-radius: 18px;
+  }
+
+  .project-card__content h3 {
+    font-size: 33px;
+  }
+
+  .project-card__links {
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+
+  .skill-group,
+  .education-panel,
+  .experience-panel,
+  .certifications {
+    padding: 22px;
+  }
+
+  .achievements-grid,
+  .repo-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .achievement-card {
+    min-height: 190px;
+  }
+
+  .contact-form__footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .contact-form__footer .button {
+    justify-content: center;
+  }
+
+  .contact-form__note {
+    max-width: none;
+  }
+
+  .site-footer {
+    padding-top: 60px;
+  }
+
+  .site-footer__links {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 30px 20px;
+  }
+
+  .site-footer__bottom {
+    align-items: flex-start;
+    flex-direction: column;
+    margin-top: 44px;
+  }
+
+  .page-hero h1,
+  .about-hero__content h1 {
+    font-size: clamp(48px, 14vw, 72px);
+  }
+
+  .filter-row {
+    gap: 6px;
+  }
+
+  .filter-row button {
+    padding: 8px 12px;
+    font-size: 8px;
+  }
+
+  .project-grid-card__body {
+    padding: 22px;
+  }
+
+  .about-experience__item {
+    grid-template-columns: 1fr;
+    gap: 16px;
+    padding-block: 30px;
+  }
+
+  .about-experience__marker {
+    padding: 0;
+  }
+
+  .contribution-widget {
+    padding: 18px;
+  }
+
+  .contribution-widget__header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .heatmap__footer {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .about-cta h2 {
+    font-size: clamp(54px, 15vw, 82px);
+  }
+
+  .intro-dialog {
+    padding: 28px 24px;
+    border-radius: 20px;
+  }
+}
+
+@media (max-width: 360px) {
+  .hire-button {
+    display: none;
+  }
+
+  .hero h1 {
+    font-size: 47px;
+  }
+
+  .hero__subtitle {
+    font-size: 24px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .orbital-dots {
+    animation: none;
+  }
+
+  .reveal {
+    transition-delay: 0ms !important;
+  }
+}
